@@ -1,7 +1,8 @@
-# *.png
-
 # Environment files (contain API keys)
 .env
+
+# SQLite cache database
+cache.db
 
 # Python
 __pycache__/
