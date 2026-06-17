@@ -6,4 +6,5 @@ data/*.db-shm
 data/*.db-wal
 .DS_Store
 coverage/
-
+docs/
+dev.log
