@@ -6,10 +6,13 @@ import type {
   ColumnPreference,
   CompanyDetail,
   CompanyRow,
+  DailyEvPoint,
   DashboardTab,
   ExitMetric,
+  ImpliedGrowthHistoryData,
   ModelCell,
   ModelDiagnostics,
+  RealizedGrowthPoint,
   RefreshRun,
   SensitivityTable,
   TerminalMethod,
@@ -18,6 +21,7 @@ import type {
   ValuationMetricStats,
   ValuationRow
 } from "@alphapane/shared";
+import { solveImpliedGrowth } from "@alphapane/shared";
 
 interface BaseRow {
   companyKey: string;
@@ -477,6 +481,7 @@ function ReverseDcfDetailView({ detail, onSaved }: { detail: CompanyDetail; onSa
       <section className="section"><h3>Model Grid</h3><ModelGrid detail={detail} /></section>
       <ModelDiagnosticsSection detail={detail} />
       <SensitivitySection tables={detail.sensitivity} />
+      <ImpliedGrowthHistorySection detail={detail} />
       <NoteSection note={note} setNote={setNote} saveNote={saveNote} />
       <SourcesSection links={detail.sourceLinks} terminalUrl={detail.row.terminalUrl} />
     </>
@@ -680,6 +685,214 @@ function PeBandChart({ history }: { history: ValuationHistoryPoint[] }) {
 
 function ModelGrid({ detail }: { detail: CompanyDetail }) {
   return <div className="model-grid-wrap"><table className="model-grid"><thead><tr><th>Line item</th>{detail.gridColumns.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{detail.gridRows.map((row) => <tr key={row.label}><td><span className={`kind ${row.kind}`}>{row.kind}</span>{row.label}</td>{detail.gridColumns.map((_, index) => <td key={index}>{formatCell(row, row.values[index])}</td>)}</tr>)}</tbody></table></div>;
+}
+
+function ImpliedGrowthHistorySection({ detail }: { detail: CompanyDetail }) {
+  const [historyData, setHistoryData] = useState<ImpliedGrowthHistoryData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [timeRange, setTimeRange] = useState<1 | 3 | 5 | 0>(5);
+  const [showRealized, setShowRealized] = useState(false);
+
+  const defaults = useMemo(() => initialAssumptions(detail), [detail]);
+
+  const [discountRate, setDiscountRate] = useState<number>(defaults.discountRate ?? 0.1);
+  const [fcfMargin, setFcfMargin] = useState<number>(defaults.normalizedFcfMargin ?? 0.2);
+  const [terminalGrowth, setTerminalGrowth] = useState<number>(defaults.terminalGrowth ?? 0.03);
+  const [exitMultiple, setExitMultiple] = useState<number>(defaults.exitMultiple ?? 20);
+
+  useEffect(() => {
+    setDiscountRate(defaults.discountRate ?? 0.1);
+    setFcfMargin(defaults.normalizedFcfMargin ?? 0.2);
+    setTerminalGrowth(defaults.terminalGrowth ?? 0.03);
+    setExitMultiple(defaults.exitMultiple ?? 20);
+  }, [defaults]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    api<ImpliedGrowthHistoryData>(`/api/companies/${detail.row.companyKey}/implied-growth-history`)
+      .then((data) => { if (!cancelled) setHistoryData(data); })
+      .catch(() => { if (!cancelled) setHistoryData(null); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [detail.row.companyKey]);
+
+  const isExitMode = defaults.terminalMethod === "exit-multiple";
+
+  const chartPoints = useMemo(() => {
+    if (!historyData || historyData.dailyEv.length === 0) return [];
+    const dailyEv = historyData.dailyEv;
+    const latest = dailyEv[dailyEv.length - 1].date;
+    if (timeRange > 0) {
+      const cutoff = new Date(latest + "T00:00:00.000Z");
+      cutoff.setUTCFullYear(cutoff.getUTCFullYear() - timeRange);
+      const cutoffStr = cutoff.toISOString().slice(0, 10);
+      const filtered = dailyEv.filter((point) => point.date >= cutoffStr && point.enterpriseValue !== null);
+      return solveHistoryPoints(filtered, historyData.revenueTimeline, { discountRate, fcfMargin, terminalGrowth, exitMultiple, terminalMethod: defaults.terminalMethod ?? "perpetuity", exitMetric: defaults.exitMetric ?? "fcf", normalizedEbitdaMargin: defaults.normalizedEbitdaMargin ?? null });
+    }
+    return solveHistoryPoints(dailyEv.filter((point) => point.enterpriseValue !== null), historyData.revenueTimeline, { discountRate, fcfMargin, terminalGrowth, exitMultiple, terminalMethod: defaults.terminalMethod ?? "perpetuity", exitMetric: defaults.exitMetric ?? "fcf", normalizedEbitdaMargin: defaults.normalizedEbitdaMargin ?? null });
+  }, [historyData, timeRange, discountRate, fcfMargin, terminalGrowth, exitMultiple, defaults.terminalMethod, defaults.exitMetric, defaults.normalizedEbitdaMargin]);
+
+  if (loading) return <section className="section"><h3>Priced-In Growth History</h3><p>Loading history data…</p></section>;
+  if (!historyData || historyData.dailyEv.length < 30) {
+    return <section className="section"><h3>Priced-In Growth History</h3><p>Insufficient daily EV history for this company. Run a price refresh to fetch data from Fiscal.ai.</p></section>;
+  }
+
+  const latestValue = chartPoints.length > 0 ? chartPoints[chartPoints.length - 1].impliedCagr : null;
+  const earliestShown = chartPoints.length > 0 ? chartPoints[0].date : null;
+  const latestShown = chartPoints.length > 0 ? chartPoints[chartPoints.length - 1].date : null;
+  const historyLabel = earliestShown && latestShown ? `${earliestShown} to ${latestShown} (${chartPoints.length} days)` : "";
+
+  return (
+    <section className="section">
+      <h3>Priced-In Growth History</h3>
+      <div className="assumption-grid">
+        <label>Discount rate ({percent(discountRate)})
+          <input type="range" min={3} max={20} step={0.5} value={discountRate * 100} onChange={(e) => setDiscountRate(Number(e.target.value) / 100)} />
+        </label>
+        <label>FCF margin ({percent(fcfMargin)})
+          <input type="range" min={1} max={60} step={1} value={fcfMargin * 100} onChange={(e) => setFcfMargin(Number(e.target.value) / 100)} />
+        </label>
+        {isExitMode ? (
+          <label>Exit multiple ({exitMultiple.toFixed(0)}x)
+            <input type="range" min={5} max={50} step={1} value={exitMultiple} onChange={(e) => setExitMultiple(Number(e.target.value))} />
+          </label>
+        ) : (
+          <label>Terminal growth ({percent(terminalGrowth)})
+            <input type="range" min={0} max={5} step={0.5} value={terminalGrowth * 100} onChange={(e) => setTerminalGrowth(Number(e.target.value) / 100)} />
+          </label>
+        )}
+      </div>
+      <div className="assumption-grid" style={{ marginBottom: 12 }}>
+        <div>
+          {["1Y", "3Y", "5Y", "Max"].map((label) => {
+            const value = label === "Max" ? 0 : Number(label[0]) as 1 | 3 | 5;
+            return <button key={label} className={timeRange === value ? "primary-action" : ""} onClick={() => setTimeRange(value)} style={{ marginRight: 4 }}>{label}</button>;
+          })}
+        </div>
+        <label className="checkbox-label"><input type="checkbox" checked={showRealized} onChange={(e) => setShowRealized(e.target.checked)} /> Show actual realized growth</label>
+      </div>
+      {latestValue !== null && <p className="headline-note">Most recent priced-in CAGR: {percent(latestValue)} · {historyLabel}</p>}
+      <ImpliedGrowthChart
+        points={chartPoints}
+        realizedGrowth={showRealized ? historyData.realizedGrowth : []}
+      />
+      {showRealized && <p className="headline-note">Realized growth shown as a dashed line. Partial/annualized values (within the last 5 years) are marked with a lighter dash pattern.</p>}
+    </section>
+  );
+}
+
+interface HistorySolveParams {
+  discountRate: number;
+  fcfMargin: number;
+  terminalGrowth: number;
+  exitMultiple: number;
+  terminalMethod: TerminalMethod;
+  exitMetric: ExitMetric;
+  normalizedEbitdaMargin: number | null;
+}
+
+function solveHistoryPoints(
+  dailyEv: DailyEvPoint[],
+  revenueTimeline: Array<{ reportDate: string; revenue: number }>,
+  params: HistorySolveParams
+): Array<{ date: string; impliedCagr: number | null }> {
+  const sortedRevenue = [...revenueTimeline].sort((a, b) => a.reportDate.localeCompare(b.reportDate));
+  return dailyEv.map((point) => {
+    const baseRevenue = pointInTimeRevenue(point.date, sortedRevenue);
+    if (baseRevenue === null) return { date: point.date, impliedCagr: null };
+    const impliedCagr = solveImpliedGrowth({
+      enterpriseValue: point.enterpriseValue,
+      baseRevenue,
+      normalizedFcfMargin: params.fcfMargin,
+      discountRate: params.discountRate,
+      terminalGrowth: params.terminalGrowth,
+      terminalMethod: params.terminalMethod,
+      exitMetric: params.exitMetric,
+      exitMultiple: params.exitMultiple,
+      normalizedEbitdaMargin: params.normalizedEbitdaMargin
+    });
+    return { date: point.date, impliedCagr };
+  });
+}
+
+function pointInTimeRevenue(date: string, sortedRevenue: Array<{ reportDate: string; revenue: number }>): number | null {
+  let result: number | null = null;
+  for (const point of sortedRevenue) {
+    if (point.reportDate <= date) result = point.revenue;
+    else break;
+  }
+  return result;
+}
+
+function ImpliedGrowthChart({
+  points,
+  realizedGrowth
+}: {
+  points: Array<{ date: string; impliedCagr: number | null }>;
+  realizedGrowth: RealizedGrowthPoint[];
+}) {
+  const width = 560;
+  const height = 260;
+  const pad = 36;
+
+  if (points.length < 2) return <p>Not enough data points to draw a chart.</p>;
+
+  const validImplied = points.map((p) => p.impliedCagr).filter((v): v is number => Number.isFinite(v));
+  const validRealized = realizedGrowth.map((p) => p.realizedCagr).filter((v): v is number => Number.isFinite(v));
+  const allValues = [...validImplied, ...validRealized];
+  if (allValues.length === 0) return <p>No solvable data points in the selected range.</p>;
+
+  const min = Math.min(...allValues);
+  const max = Math.max(...allValues);
+  const span = max - min || 0.1;
+
+  const x = (index: number, total: number) => pad + (index / Math.max(total - 1, 1)) * (width - pad * 2);
+  const y = (value: number) => height - pad - ((value - min) / span) * (height - pad * 2);
+
+  const impliedPoints = points
+    .map((point, index) => {
+      if (point.impliedCagr === null || !Number.isFinite(point.impliedCagr)) return null;
+      return `${x(index, points.length)},${y(point.impliedCagr)}`;
+    })
+    .filter(Boolean)
+    .join(" ");
+
+  const sortedRealized = [...realizedGrowth].sort((a, b) => a.date.localeCompare(b.date));
+  const realizedFullPoints = sortedRealized
+    .filter((point) => !point.isPartial && point.realizedCagr !== null && Number.isFinite(point.realizedCagr))
+    .map((point, index, arr) => {
+      const xi = x(index, arr.length);
+      return `${xi},${y(point.realizedCagr as number)}`;
+    })
+    .join(" ");
+  const realizedPartialPoints = sortedRealized
+    .filter((point) => point.isPartial && point.realizedCagr !== null && Number.isFinite(point.realizedCagr))
+    .map((point, index, arr) => {
+      const xi = x(index, arr.length);
+      return `${xi},${y(point.realizedCagr as number)}`;
+    })
+    .join(" ");
+
+  const firstDate = points[0].date;
+  const lastDate = points[points.length - 1].date;
+
+  return (
+    <div className="chart-wrap">
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Priced-in growth history chart">
+        <line x1={pad} y1={height - pad} x2={width - pad} y2={height - pad} className="axis" />
+        <line x1={pad} y1={pad} x2={pad} y2={height - pad} className="axis" />
+        {realizedPartialPoints && <polyline points={realizedPartialPoints} fill="none" stroke="#a78bfa" strokeWidth={1.5} strokeDasharray="2,3" />}
+        {realizedFullPoints && <polyline points={realizedFullPoints} fill="none" stroke="#7c3aed" strokeWidth={1.5} strokeDasharray="5,3" />}
+        <polyline points={impliedPoints} fill="none" stroke="#2563eb" strokeWidth={2.2} />
+      </svg>
+      <div className="chart-legend">
+        <span><i style={{ background: "#2563eb" }} />Priced-in growth</span>
+        {realizedGrowth.length > 0 && <span><i style={{ background: "#7c3aed" }} />Realized growth</span>}
+      </div>
+      <p style={{ fontSize: 11, color: "#5b6258" }}>{firstDate} — {lastDate}</p>
+    </div>
+  );
 }
 
 function NoteSection({ note, setNote, saveNote }: { note: string; setNote: (value: string) => void; saveNote: () => Promise<void> }) {
