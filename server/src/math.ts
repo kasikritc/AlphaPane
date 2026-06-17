@@ -1,4 +1,4 @@
-import type { ModelCell, Signal } from "@alphapane/shared";
+import type { ModelCell, ModelDiagnostics, Signal, SolveStatus } from "@alphapane/shared";
 
 export interface HistoryPoint {
   year: number;
@@ -25,6 +25,7 @@ export interface ModelOutput {
   signal: Signal;
   status: string;
   statusMessage: string | null;
+  diagnostics: ModelDiagnostics | null;
   gridRows: ModelCell[];
 }
 
@@ -80,12 +81,14 @@ export function deriveSignal(implied: number | null, historical: number | null):
 export function buildModel(inputs: DcfInputs): ModelOutput {
   const missing = requiredMissing(inputs);
   if (missing.length > 0) {
+    const statusMessage = `Missing ${missing.join(", ")}.`;
     return {
       impliedRevenueCagr: null,
       cagrGap: null,
       signal: "insufficient data",
       status: "insufficient-data",
-      statusMessage: `Missing ${missing.join(", ")}.`,
+      statusMessage,
+      diagnostics: emptyDiagnostics("insufficient-data", statusMessage),
       gridRows: emptyGrid()
     };
   }
@@ -103,15 +106,14 @@ export function buildModel(inputs: DcfInputs): ModelOutput {
     return invalid("Discount rate must be greater than terminal growth.");
   }
 
-  const impliedRevenueCagr = solveGrowth((growth) =>
-    intrinsicDcfEv({
-      baseRevenue,
-      growth,
-      normalizedFcfMargin,
-      discountRate,
-      terminalGrowth
-    }) - enterpriseValue
+  const solve = solveGrowthWithDiagnostics(
+    (growth) => evaluateDcf({ baseRevenue, growth, normalizedFcfMargin, discountRate, terminalGrowth }).intrinsicEv,
+    enterpriseValue
   );
+  const impliedRevenueCagr = solve.impliedGrowth;
+  const solvedEvaluation = impliedRevenueCagr === null
+    ? null
+    : evaluateDcf({ baseRevenue, growth: impliedRevenueCagr, normalizedFcfMargin, discountRate, terminalGrowth });
 
   const cagrGap =
     Number.isFinite(impliedRevenueCagr) && Number.isFinite(inputs.historicalRevenueCagr5y)
@@ -126,13 +128,20 @@ export function buildModel(inputs: DcfInputs): ModelOutput {
     terminalGrowth,
     impliedRevenueCagr
   });
+  const diagnostics = makeDiagnostics({
+    solve,
+    solvedEvaluation,
+    enterpriseValue,
+    baseRevenue
+  });
 
   return {
     impliedRevenueCagr,
     cagrGap,
     signal,
-    status: impliedRevenueCagr === null ? "outside-model-range" : "ok",
-    statusMessage: impliedRevenueCagr === null ? "Reverse DCF solve is outside the -50% to +100% model range." : null,
+    status: solve.status,
+    statusMessage: solve.statusMessage,
+    diagnostics,
     gridRows
   };
 }
@@ -157,6 +166,7 @@ function invalid(message: string): ModelOutput {
     signal: "insufficient data",
     status: "invalid-assumptions",
     statusMessage: message,
+    diagnostics: emptyDiagnostics("invalid-assumptions", message),
     gridRows: emptyGrid()
   };
 }
@@ -169,51 +179,140 @@ function emptyGrid(): ModelCell[] {
   ];
 }
 
-function solveGrowth(fn: (growth: number) => number): number | null {
-  let low = -0.5;
-  let high = 1.0;
-  let lowValue = fn(low);
-  let highValue = fn(high);
-  if (!Number.isFinite(lowValue) || !Number.isFinite(highValue)) return null;
-  if (lowValue === 0) return low;
-  if (highValue === 0) return high;
-  if (lowValue > 0 || highValue < 0) return null;
-
-  for (let i = 0; i < 100; i += 1) {
-    const mid = (low + high) / 2;
-    const value = fn(mid);
-    if (Math.abs(value) < 1) return mid;
-    if (value < 0) {
-      low = mid;
-      lowValue = value;
-    } else {
-      high = mid;
-      highValue = value;
-    }
-  }
-  return (low + high) / 2;
+interface DcfEvaluation {
+  revenues: number[];
+  fcf: number[];
+  pvFcf: number;
+  terminalValue: number;
+  pvTerminalValue: number;
+  intrinsicEv: number;
 }
 
-function intrinsicDcfEv(input: {
+interface GrowthSolveDiagnostics {
+  impliedGrowth: number | null;
+  status: SolveStatus;
+  statusMessage: string | null;
+  boundaryDirection: ModelDiagnostics["boundaryDirection"];
+  valueAtLowGrowth: number | null;
+  valueAtHighGrowth: number | null;
+  lowGrowthDelta: number | null;
+  highGrowthDelta: number | null;
+}
+
+function solveGrowthWithDiagnostics(modeledEv: (growth: number) => number, targetEv: number): GrowthSolveDiagnostics {
+  let low = -0.5;
+  let high = 1.0;
+  const lowModeledEv = modeledEv(low);
+  const highModeledEv = modeledEv(high);
+  const lowDelta = lowModeledEv - targetEv;
+  const highDelta = highModeledEv - targetEv;
+  const base = {
+    valueAtLowGrowth: Number.isFinite(lowModeledEv) ? lowModeledEv : null,
+    valueAtHighGrowth: Number.isFinite(highModeledEv) ? highModeledEv : null,
+    lowGrowthDelta: Number.isFinite(lowDelta) ? lowDelta : null,
+    highGrowthDelta: Number.isFinite(highDelta) ? highDelta : null
+  };
+  if (!Number.isFinite(lowDelta) || !Number.isFinite(highDelta)) {
+    return { impliedGrowth: null, status: "invalid-assumptions", statusMessage: "Reverse DCF produced non-finite boundary values.", boundaryDirection: null, ...base };
+  }
+  if (lowDelta === 0) return { impliedGrowth: low, status: "ok", statusMessage: null, boundaryDirection: null, ...base };
+  if (highDelta === 0) return { impliedGrowth: high, status: "ok", statusMessage: null, boundaryDirection: null, ...base };
+  if (lowDelta > 0) {
+    return {
+      impliedGrowth: null,
+      status: "below-range",
+      statusMessage: "Even at -50% revenue CAGR, modeled EV is above current EV.",
+      boundaryDirection: "requires-lower-growth",
+      ...base
+    };
+  }
+  if (highDelta < 0) {
+    return {
+      impliedGrowth: null,
+      status: "above-range",
+      statusMessage: "Even at +100% revenue CAGR, modeled EV is below current EV.",
+      boundaryDirection: "requires-higher-growth",
+      ...base
+    };
+  }
+
+  let lowBound = low;
+  let highBound = high;
+  for (let i = 0; i < 100; i += 1) {
+    const mid = (lowBound + highBound) / 2;
+    const value = modeledEv(mid) - targetEv;
+    if (Math.abs(value) < 1) return { impliedGrowth: mid, status: "ok", statusMessage: null, boundaryDirection: null, ...base };
+    if (value < 0) lowBound = mid;
+    else highBound = mid;
+  }
+  return { impliedGrowth: (lowBound + highBound) / 2, status: "ok", statusMessage: null, boundaryDirection: null, ...base };
+}
+
+function evaluateDcf(input: {
   baseRevenue: number;
   growth: number;
   normalizedFcfMargin: number;
   discountRate: number;
   terminalGrowth: number;
-}): number {
-  const cashFlows = forecastCashFlows(input.baseRevenue, input.growth, input.normalizedFcfMargin);
-  const pvFcf = cashFlows.reduce((sum, fcf, index) => sum + fcf / Math.pow(1 + input.discountRate, index + 1), 0);
-  const terminalFcf = cashFlows[4] * (1 + input.terminalGrowth);
+}): DcfEvaluation {
+  const revenues = forecastRevenues(input.baseRevenue, input.growth);
+  const fcf = revenues.map((revenue) => revenue * input.normalizedFcfMargin);
+  const pvFcfByYear = fcf.map((value, index) => value / Math.pow(1 + input.discountRate, index + 1));
+  const pvFcf = pvFcfByYear.reduce((sum, value) => sum + value, 0);
+  const terminalFcf = fcf[4] * (1 + input.terminalGrowth);
   const terminalValue = terminalFcf / (input.discountRate - input.terminalGrowth);
-  return pvFcf + terminalValue / Math.pow(1 + input.discountRate, 5);
+  const pvTerminalValue = terminalValue / Math.pow(1 + input.discountRate, 5);
+  return {
+    revenues,
+    fcf,
+    pvFcf,
+    terminalValue,
+    pvTerminalValue,
+    intrinsicEv: pvFcf + pvTerminalValue
+  };
+}
+
+function makeDiagnostics(input: {
+  solve: GrowthSolveDiagnostics;
+  solvedEvaluation: DcfEvaluation | null;
+  enterpriseValue: number;
+  baseRevenue: number;
+}): ModelDiagnostics {
+  return {
+    solveStatus: input.solve.status,
+    boundaryDirection: input.solve.boundaryDirection,
+    valueAtLowGrowth: input.solve.valueAtLowGrowth,
+    valueAtHighGrowth: input.solve.valueAtHighGrowth,
+    lowGrowthDelta: input.solve.lowGrowthDelta,
+    highGrowthDelta: input.solve.highGrowthDelta,
+    terminalValueShare: input.solvedEvaluation && input.enterpriseValue > 0 ? input.solvedEvaluation.pvTerminalValue / input.enterpriseValue : null,
+    explicitFcfShare: input.solvedEvaluation && input.enterpriseValue > 0 ? input.solvedEvaluation.pvFcf / input.enterpriseValue : null,
+    currentEvToRevenue: input.baseRevenue > 0 ? input.enterpriseValue / input.baseRevenue : null,
+    impliedY5Revenue: input.solvedEvaluation?.revenues[4] ?? null,
+    impliedY5Fcf: input.solvedEvaluation?.fcf[4] ?? null,
+    statusMessage: input.solve.statusMessage
+  };
+}
+
+function emptyDiagnostics(status: SolveStatus, statusMessage: string | null): ModelDiagnostics {
+  return {
+    solveStatus: status,
+    boundaryDirection: null,
+    valueAtLowGrowth: null,
+    valueAtHighGrowth: null,
+    lowGrowthDelta: null,
+    highGrowthDelta: null,
+    terminalValueShare: null,
+    explicitFcfShare: null,
+    currentEvToRevenue: null,
+    impliedY5Revenue: null,
+    impliedY5Fcf: null,
+    statusMessage
+  };
 }
 
 function forecastRevenues(baseRevenue: number, growth: number): number[] {
   return Array.from({ length: 5 }, (_, index) => baseRevenue * Math.pow(1 + growth, index + 1));
-}
-
-function forecastCashFlows(baseRevenue: number, growth: number, margin: number): number[] {
-  return forecastRevenues(baseRevenue, growth).map((revenue) => revenue * margin);
 }
 
 function makeGridRows(input: {

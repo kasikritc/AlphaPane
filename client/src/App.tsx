@@ -8,6 +8,7 @@ import type {
   CompanyRow,
   DashboardTab,
   ModelCell,
+  ModelDiagnostics,
   RefreshRun,
   ValuationDetail,
   ValuationHistoryPoint,
@@ -452,6 +453,7 @@ function ReverseDcfDetailView({ detail, onSaved }: { detail: CompanyDetail; onSa
       </section>
       <section className="section"><h3>Default Sources</h3><div className="source-grid"><Metric label="Revenue" value={detail.sources.latestRevenue ?? "-"} /><Metric label="FCF margin" value={detail.sources.normalizedFcfMargin ?? "-"} /><Metric label="History CAGR" value={detail.sources.historicalRevenueCagr5y ?? "-"} /></div></section>
       <section className="section"><h3>Model Grid</h3><ModelGrid detail={detail} /></section>
+      <ModelDiagnosticsSection detail={detail} />
       <NoteSection note={note} setNote={setNote} saveNote={saveNote} />
       <SourcesSection links={detail.sourceLinks} terminalUrl={detail.row.terminalUrl} />
     </>
@@ -459,6 +461,32 @@ function ReverseDcfDetailView({ detail, onSaved }: { detail: CompanyDetail; onSa
 }
 
 
+
+function ModelDiagnosticsSection({ detail }: { detail: CompanyDetail }) {
+  const d = detail.diagnostics;
+  if (!d) return null;
+  return (
+    <section className="section">
+      <h3>Model Diagnostics</h3>
+      {d.statusMessage && <div className={d.solveStatus === "ok" ? "inline-note" : "inline-warning"}>{d.statusMessage}</div>}
+      <div className="metric-table-wrap base-financials">
+        <table className="model-grid">
+          <tbody>
+            <tr><th>Diagnostic</th><th>Value</th></tr>
+            <tr><td>Implied CAGR solve status</td><td>{solveStatusLabel(d.solveStatus)}</td></tr>
+            <tr><td>Value at -50% growth</td><td>{compactMoney(d.valueAtLowGrowth)}</td></tr>
+            <tr><td>Value at +100% growth</td><td>{compactMoney(d.valueAtHighGrowth)}</td></tr>
+            <tr><td>Terminal value as % of EV</td><td>{percent(d.terminalValueShare)}</td></tr>
+            <tr><td>PV explicit FCF as % of EV</td><td>{percent(d.explicitFcfShare)}</td></tr>
+            <tr><td>Current EV / revenue</td><td>{multiple(d.currentEvToRevenue)}</td></tr>
+            <tr><td>Implied Y5 revenue</td><td>{compactMoney(d.impliedY5Revenue)}</td></tr>
+            <tr><td>Implied Y5 FCF</td><td>{compactMoney(d.impliedY5Fcf)}</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
 
 function EvBridgeSection({ detail }: { detail: CompanyDetail }) {
   const bridge = detail.evBridge;
@@ -665,6 +693,17 @@ function zScore(value: number | null): string {
 function dateShort(value: string | null): string {
   if (!value) return "-";
   return new Date(value).toLocaleDateString();
+}
+
+function solveStatusLabel(status: ModelDiagnostics["solveStatus"]): string {
+  switch (status) {
+    case "ok": return "OK";
+    case "above-range": return "Above range";
+    case "below-range": return "Below range";
+    case "insufficient-data": return "Insufficient data";
+    case "invalid-assumptions": return "Invalid assumptions";
+    default: return status;
+  }
 }
 
 function latestDate(values: Array<string | null>): string | null {

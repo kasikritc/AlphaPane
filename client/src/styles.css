@@ -542,6 +542,16 @@ textarea {
   font-size: 12px;
 }
 
+.inline-note {
+  border: 1px solid #c7d6e8;
+  background: #f1f6fc;
+  color: #244660;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+
 .model-grid-wrap {
   overflow: auto;
   border: 1px solid #d8ddd3;

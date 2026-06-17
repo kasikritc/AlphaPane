@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { AssumptionSet, AssumptionSources, BasePeriod, ColumnPreference, CompanyDetail, CompanyRow, EvBridge, FinancialBase, ModelCell, RefreshRun, ValuationDetail, ValuationHistoryPoint, ValuationMetricKey, ValuationMetricStats, ValuationRow } from "@alphapane/shared";
+import type { AssumptionSet, AssumptionSources, BasePeriod, ColumnPreference, CompanyDetail, CompanyRow, EvBridge, FinancialBase, ModelCell, ModelDiagnostics, RefreshRun, ValuationDetail, ValuationHistoryPoint, ValuationMetricKey, ValuationMetricStats, ValuationRow } from "@alphapane/shared";
 import { TRIAL_COMPANIES } from "@alphapane/shared";
 import { buildModel, median } from "./math.js";
 import { VALUATION_RATIOS } from "./valuation.js";
@@ -58,8 +58,8 @@ export function getCompanyDetail(db: DatabaseSync, companyKey: string): CompanyD
     .prepare("SELECT base_financials_json, ev_bridge_json, revenue_history_json, fcf_history_json, source_links_json FROM financial_snapshots WHERE company_key = ?")
     .get(companyKey) as { base_financials_json?: string; ev_bridge_json?: string; revenue_history_json?: string; fcf_history_json?: string; source_links_json?: string } | undefined;
   const model = db
-    .prepare("SELECT model_grid_json FROM model_outputs WHERE company_key = ?")
-    .get(companyKey) as { model_grid_json?: string } | undefined;
+    .prepare("SELECT model_grid_json, diagnostics_json FROM model_outputs WHERE company_key = ?")
+    .get(companyKey) as { model_grid_json?: string; diagnostics_json?: string } | undefined;
 
   const overrides = getAssumptionOverrides(joined);
   const defaults = getAssumptionDefaults(joined);
@@ -75,6 +75,7 @@ export function getCompanyDetail(db: DatabaseSync, companyKey: string): CompanyD
     sources: getAssumptionSources(joined),
     baseFinancials: { selected, ...bases },
     evBridge,
+    diagnostics: parseJson<ModelDiagnostics | null>(model?.diagnostics_json, null),
     gridColumns: GRID_COLUMNS,
     gridRows,
     revenueHistory: parseJson(financial?.revenue_history_json, []),
@@ -432,14 +433,15 @@ export function recomputeModels(db: DatabaseSync, companyKeys: readonly string[]
   const upsert = db.prepare(`
     INSERT INTO model_outputs (
       company_key, implied_revenue_cagr, cagr_gap,
-      signal, model_grid_json, status, status_message, updated_at
+      signal, model_grid_json, diagnostics_json, status, status_message, updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(company_key) DO UPDATE SET
       implied_revenue_cagr = excluded.implied_revenue_cagr,
       cagr_gap = excluded.cagr_gap,
       signal = excluded.signal,
       model_grid_json = excluded.model_grid_json,
+      diagnostics_json = excluded.diagnostics_json,
       status = excluded.status,
       status_message = excluded.status_message,
       updated_at = excluded.updated_at
@@ -463,6 +465,7 @@ export function recomputeModels(db: DatabaseSync, companyKeys: readonly string[]
       output.cagrGap,
       output.signal,
       JSON.stringify(output.gridRows),
+      JSON.stringify(output.diagnostics),
       output.status,
       output.statusMessage,
       now()

@@ -136,6 +136,7 @@ function migrate(db: DatabaseSync): void {
       cagr_gap REAL,
       signal TEXT NOT NULL DEFAULT 'insufficient data',
       model_grid_json TEXT NOT NULL DEFAULT '[]',
+      diagnostics_json TEXT NOT NULL DEFAULT '{}',
       status TEXT NOT NULL DEFAULT 'insufficient-data',
       status_message TEXT,
       updated_at TEXT
@@ -173,6 +174,7 @@ function migrate(db: DatabaseSync): void {
   addColumnIfMissing(db, 'financial_snapshots', 'latest_revenue_source', 'TEXT');
   addColumnIfMissing(db, 'financial_snapshots', 'historical_revenue_cagr_5y_source', 'TEXT');
   addColumnIfMissing(db, 'assumption_overrides', 'base_period', 'TEXT');
+  addColumnIfMissing(db, 'model_outputs', 'diagnostics_json', "TEXT NOT NULL DEFAULT '{}'");
 }
 
 function addColumnIfMissing(db: DatabaseSync, table: string, column: string, definition: string): void {

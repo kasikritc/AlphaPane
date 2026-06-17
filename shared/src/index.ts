@@ -179,6 +179,25 @@ export interface AssumptionSources {
   historicalRevenueCagr5y: string | null;
 }
 
+
+export type SolveStatus = "ok" | "above-range" | "below-range" | "insufficient-data" | "invalid-assumptions";
+export type BoundaryDirection = "requires-higher-growth" | "requires-lower-growth" | null;
+
+export interface ModelDiagnostics {
+  solveStatus: SolveStatus;
+  boundaryDirection: BoundaryDirection;
+  valueAtLowGrowth: number | null;
+  valueAtHighGrowth: number | null;
+  lowGrowthDelta: number | null;
+  highGrowthDelta: number | null;
+  terminalValueShare: number | null;
+  explicitFcfShare: number | null;
+  currentEvToRevenue: number | null;
+  impliedY5Revenue: number | null;
+  impliedY5Fcf: number | null;
+  statusMessage: string | null;
+}
+
 export interface ModelCell {
   label: string;
   kind: "actual" | "assumption" | "override" | "calculated" | "solved" | "blank";
@@ -197,6 +216,7 @@ export interface CompanyDetail {
     annual: FinancialBase | null;
   };
   evBridge: EvBridge | null;
+  diagnostics: ModelDiagnostics | null;
   gridColumns: string[];
   gridRows: ModelCell[];
   revenueHistory: Array<{ year: number; value: number; reportDate: string }>;
