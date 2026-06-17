@@ -1,3 +1,10 @@
+import { solveImpliedGrowth, evaluateDcf, terminalMetricValue, computeRealizedGrowth, cagr } from "./dcf.js";
+import type { DcfSolveInputs, RevenuePoint, RealizedGrowthPoint } from "./dcf.js";
+
+export { solveImpliedGrowth, evaluateDcf, terminalMetricValue, computeRealizedGrowth, cagr };
+export type { DcfSolveInputs, RevenuePoint, RealizedGrowthPoint };
+
+
 export const TRIAL_COMPANIES = [
   "NASDAQ_MSFT",
   "NASDAQ_NVDA",
@@ -270,4 +277,20 @@ export interface RefreshRun {
 export interface ColumnPreference {
   key: string;
   visible: boolean;
+}
+
+export interface DailyEvPoint {
+  date: string;
+  enterpriseValue: number | null;
+  sharePrice: number | null;
+}
+
+
+export interface ImpliedGrowthHistoryData {
+  dailyEv: DailyEvPoint[];
+  revenueTimeline: Array<{ reportDate: string; revenue: number }>;
+  realizedGrowth: RealizedGrowthPoint[];
+  maxHistoryYears: number;
+  earliestDate: string | null;
+  latestDate: string | null;
 }
