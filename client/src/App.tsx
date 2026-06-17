@@ -193,7 +193,7 @@ export function App() {
       <header className="topbar">
         <div>
           <h1>AlphaPane</h1>
-          <p>Fiscal AI market scanner for reverse DCF and historical valuation mean reversion.</p>
+          <p>AlphaPane market scanner for reverse DCF and historical valuation mean reversion.</p>
         </div>
         <div className="actions">
           <button onClick={() => void runRefresh("prices")} disabled={Boolean(refreshing)}>
@@ -453,7 +453,7 @@ function PeBandChart({ history }: { history: ValuationHistoryPoint[] }) {
     ...["-2σ", "-1σ", "Mean", "+1σ", "+2σ"].map((label, index) => ({ label, color: ["#16a34a", "#84cc16", "#2563eb", "#f97316", "#dc2626"][index], values: history.map((point) => point.bandPrices[label] ?? null) }))
   ];
   const allValues = series.flatMap((item) => item.values).filter((value): value is number => Number.isFinite(value));
-  if (history.length < 2 || allValues.length === 0) return <p>No P/E band history cached yet. Run Refresh Market after adding a Fiscal API key.</p>;
+  if (history.length < 2 || allValues.length === 0) return <p>No P/E band history cached yet. Run Refresh Market after configuring data access.</p>;
   const min = Math.min(...allValues);
   const max = Math.max(...allValues);
   const span = max - min || 1;
@@ -483,7 +483,7 @@ function NoteSection({ note, setNote, saveNote }: { note: string; setNote: (valu
 }
 
 function SourcesSection({ links, terminalUrl }: { links: Array<{ label: string; url: string }>; terminalUrl: string | null }) {
-  return <section className="section source-section"><h3>Sources</h3>{links.length === 0 ? <p>No filing source links cached yet.</p> : links.map((link) => <a key={link.url} href={link.url} target="_blank" rel="noreferrer">{link.label}</a>)}{terminalUrl && <a href={terminalUrl} target="_blank" rel="noreferrer">View in Fiscal</a>}</section>;
+  return <section className="section source-section"><h3>Sources</h3>{links.length === 0 ? <p>No filing source links cached yet.</p> : links.map((link) => <a key={link.url} href={link.url} target="_blank" rel="noreferrer">{link.label}</a>)}{terminalUrl && <a href={terminalUrl} target="_blank" rel="noreferrer">Open source</a>}</section>;
 }
 
 function EmptyDetail({ runs, label }: { runs: RefreshRun[]; label: string }) {

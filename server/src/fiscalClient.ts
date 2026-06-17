@@ -59,7 +59,7 @@ export class FiscalClient {
 
   private async request(path: string, query: Query): Promise<any> {
     if (!this.apiKey) {
-      throw new Error("Missing FISCAL_API_KEY. Add it to .env before refreshing Fiscal data.");
+      throw new Error("Missing API key. Add it to .env before refreshing data.");
     }
     const url = new URL(`${this.baseUrl}${path}`);
     for (const [key, value] of Object.entries(query)) {
@@ -74,7 +74,7 @@ export class FiscalClient {
     });
     if (!response.ok) {
       const body = await response.text();
-      throw new Error(`Fiscal ${response.status} ${response.statusText}: ${body.slice(0, 300)}`);
+      throw new Error(`Data API ${response.status} ${response.statusText}: ${body.slice(0, 300)}`);
     }
     return response.json();
   }

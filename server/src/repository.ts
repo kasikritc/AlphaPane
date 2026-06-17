@@ -227,9 +227,9 @@ function inferRevenueFromCache(row: Record<string, unknown>): { value: number | 
 
 function chooseCachedExitMultiple(row: Record<string, unknown>): { value: number | null; source: string | null } {
   const evToRevenue = numberOrNull(row.ev_to_revenue);
-  if (isPositive(evToRevenue)) return { value: evToRevenue, source: "Fiscal ratio fallback: latest EV/Sales" };
+  if (isPositive(evToRevenue)) return { value: evToRevenue, source: "Data fallback: latest EV/Sales" };
   const priceToSales = numberOrNull(row.price_to_sales);
-  if (isPositive(priceToSales)) return { value: priceToSales, source: "Fiscal ratio fallback: latest P/S" };
+  if (isPositive(priceToSales)) return { value: priceToSales, source: "Data fallback: latest P/S" };
   return { value: null, source: null };
 }
 

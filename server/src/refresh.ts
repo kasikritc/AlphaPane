@@ -126,7 +126,7 @@ function deriveFinancialSnapshot(
   const historicalRevenueCagr5ySource = standardizedRevenueCagr !== null
     ? "Standardized 5Y revenue history"
     : ratioRevenueCagr !== null
-      ? "Fiscal ratio fallback: growth_revenue_5y_cagr"
+      ? "Data fallback: growth_revenue_5y_cagr"
       : null;
 
   const marginDefault = chooseNormalizedFcfMargin(fcfHistory, ratios);
@@ -169,17 +169,17 @@ function chooseNormalizedFcfMargin(
 
   const positiveAnnualRatioMedian = median(annualRatioValues(ratios, "ratio_fcf_margin").slice(-10).filter(isPositive));
   if (isPositive(positiveAnnualRatioMedian)) {
-    return { value: positiveAnnualRatioMedian, source: "Fiscal ratio fallback: positive FCF margin history" };
+    return { value: positiveAnnualRatioMedian, source: "Data fallback: positive FCF margin history" };
   }
 
   const latestRatioMargin = ratioValue(ratios, "ratio_fcf_margin");
   if (isPositive(latestRatioMargin)) {
-    return { value: latestRatioMargin, source: "Fiscal ratio fallback: latest ratio_fcf_margin" };
+    return { value: latestRatioMargin, source: "Data fallback: latest ratio_fcf_margin" };
   }
 
   return {
     value: fiveYearMedian ?? latestRatioMargin,
-    source: fiveYearMedian !== null ? "5Y median FCF margin is non-positive" : latestRatioMargin !== null ? "Fiscal ratio fallback is non-positive" : null
+    source: fiveYearMedian !== null ? "5Y median FCF margin is non-positive" : latestRatioMargin !== null ? "Data fallback is non-positive" : null
   };
 }
 
@@ -188,13 +188,13 @@ function chooseExitRevenueMultiple(ratios: Record<string, unknown>): { value: nu
   if (isPositive(annualEvSales)) return { value: annualEvSales, source: "5Y median EV/Sales" };
 
   const latestEvSales = ratioValue(ratios, "ratio_ev_to_sales");
-  if (isPositive(latestEvSales)) return { value: latestEvSales, source: "Fiscal ratio fallback: latest EV/Sales" };
+  if (isPositive(latestEvSales)) return { value: latestEvSales, source: "Data fallback: latest EV/Sales" };
 
   const annualPriceSales = median(annualRatioValues(ratios, "ratio_price_to_sales").slice(-5));
-  if (isPositive(annualPriceSales)) return { value: annualPriceSales, source: "Fiscal ratio fallback: 5Y median P/S" };
+  if (isPositive(annualPriceSales)) return { value: annualPriceSales, source: "Data fallback: 5Y median P/S" };
 
   const latestPriceSales = ratioValue(ratios, "ratio_price_to_sales");
-  if (isPositive(latestPriceSales)) return { value: latestPriceSales, source: "Fiscal ratio fallback: latest P/S" };
+  if (isPositive(latestPriceSales)) return { value: latestPriceSales, source: "Data fallback: latest P/S" };
 
   return { value: null, source: null };
 }
