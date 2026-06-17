@@ -8,6 +8,7 @@ import {
   finishRefreshRun,
   recomputeModels,
   upsertCompanyProfile,
+  upsertDailyEvHistory,
   upsertFinancialSnapshot,
   upsertMarketSnapshot,
   upsertValuationSnapshot
@@ -29,6 +30,7 @@ export async function refreshPrices(db: DatabaseSync, client = new FiscalClient(
       const latest = selectLatestRatioRow(ratios);
       upsertMarketSnapshot(db, companyKey, latest);
       await refreshValuationSnapshot(db, companyKey, client);
+      await refreshDailyEvHistory(db, companyKey, client);
     }
     recomputeModels(db);
     finishRefreshRun(db, runId, "success", `Updated market data for ${TRIAL_COMPANIES.length} companies.`);
@@ -70,6 +72,28 @@ async function refreshValuationSnapshot(db: DatabaseSync, companyKey: string, cl
   const ratiosByKey = Object.fromEntries(ratioEntries) as any;
   const prices = await client.stockPrices(companyKey);
   upsertValuationSnapshot(db, companyKey, buildValuationSnapshot(ratiosByKey, prices));
+}
+
+async function refreshDailyEvHistory(db: DatabaseSync, companyKey: string, client: FiscalClient): Promise<void> {
+  try {
+    const [tevSeries, prices] = await Promise.all([
+      client.dailyRatio(companyKey, "calculated_tev"),
+      client.stockPrices(companyKey)
+    ]);
+    const evPoints = (Array.isArray(tevSeries) ? tevSeries : [])
+      .map((row: any) => ({
+        date: String(row.date ?? "").slice(0, 10),
+        enterpriseValue: numberOrNull(row.ratio ?? row.value)
+      }))
+      .filter((point: { date: string; enterpriseValue: number | null }) => point.date);
+    const pricePoints = prices.map((point) => ({
+      date: String(point.date).slice(0, 10),
+      sharePrice: numberOrNull(point.close_price)
+    }));
+    upsertDailyEvHistory(db, companyKey, evPoints, pricePoints);
+  } catch {
+    // Daily EV history is best-effort; failures should not break price refresh.
+  }
 }
 
 function deriveFinancialSnapshot(
