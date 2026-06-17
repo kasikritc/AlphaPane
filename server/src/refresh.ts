@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import type { BasePeriod, FinancialBase } from "@alphapane/shared";
 import { TRIAL_COMPANIES } from "@alphapane/shared";
 import { FiscalClient } from "./fiscalClient.js";
 import { cagr, defaultDiscountRate, median, normalizeTerminalGrowth } from "./math.js";
@@ -16,6 +17,7 @@ import { buildValuationSnapshot, VALUATION_RATIOS } from "./valuation.js";
 interface StandardizedRow {
   reportDate: string;
   calendarYear: number;
+  periodType?: string;
   metricsValues: Record<string, any>;
 }
 
@@ -43,8 +45,8 @@ export async function refreshFinancials(db: DatabaseSync, client = new FiscalCli
       const [profile, ratios, income, cashFlow] = await Promise.all([
         client.companyProfile(companyKey),
         client.companyRatios(companyKey, "latest,annual"),
-        client.standardizedFinancials(companyKey, "income-statement"),
-        client.standardizedFinancials(companyKey, "cash-flow-statement")
+        client.standardizedFinancials(companyKey, "income-statement", "ltm,annual"),
+        client.standardizedFinancials(companyKey, "cash-flow-statement", "ltm,annual")
       ]);
 
       upsertCompanyProfile(db, { ...profile, companyKey });
@@ -77,7 +79,11 @@ function deriveFinancialSnapshot(
 ) {
   const latestRatioRow = selectLatestRatioRow(ratios);
   const latestRatioValues = latestRatioRow?.metricValues ?? {};
-  const revenueHistory = standardizedRows(income)
+  const incomeRows = standardizedRows(income);
+  const cashFlowRows = standardizedRows(cashFlow);
+  const baseFinancials = buildFinancialBases(incomeRows, cashFlowRows);
+  const revenueHistory = incomeRows
+    .filter((row) => row.periodType === "Annual")
     .map((row) => ({
       year: row.calendarYear,
       reportDate: row.reportDate,
@@ -86,21 +92,11 @@ function deriveFinancialSnapshot(
     .filter((point): point is { year: number; reportDate: string; value: number } => Number.isFinite(point.value))
     .sort((a, b) => a.reportDate.localeCompare(b.reportDate));
 
-  const cashFlowRows = standardizedRows(cashFlow).sort((a, b) => a.reportDate.localeCompare(b.reportDate));
-  const fcfHistory = cashFlowRows
+  const annualCashFlowRows = cashFlowRows.filter((row) => row.periodType === "Annual").sort((a, b) => a.reportDate.localeCompare(b.reportDate));
+  const fcfHistory = annualCashFlowRows
     .map((row) => {
-      const operatingCashFlow = pickValue(row.metricsValues, [
-        "cash_flow_statement_net_cash_from_operating_activities",
-        "cash_flow_statement_cash_from_operating_activities"
-      ]);
-      const capex = pickValue(row.metricsValues, [
-        "cash_flow_statement_purchases_of_property_plant_and_equipment",
-        "cash_flow_statement_purchase_of_property_plant_and_equipment",
-        "cash_flow_statement_capital_expenditures",
-        "cash_flow_statement_net_capital_expenditure"
-      ]);
       const revenue = revenueHistory.find((point) => point.reportDate === row.reportDate)?.value ?? null;
-      const value = operatingCashFlow !== null && capex !== null ? operatingCashFlow + capex : null;
+      const value = freeCashFlowFromRow(row);
       return {
         year: row.calendarYear,
         reportDate: row.reportDate,
@@ -112,12 +108,11 @@ function deriveFinancialSnapshot(
 
   const standardizedLatestRevenue = revenueHistory.at(-1) ?? null;
   const inferredRevenue = inferLatestRevenue(latestRatioValues);
-  const latestRevenue = standardizedLatestRevenue?.value ?? inferredRevenue.value;
-  const latestRevenueSource = standardizedLatestRevenue
-    ? "Standardized income statement"
-    : inferredRevenue.source;
-  const latestRevenueReportDate = standardizedLatestRevenue?.reportDate ?? nullableString(latestRatioRow?.reportDate);
-  const latestRevenueYear = standardizedLatestRevenue?.year ?? null;
+  const selectedBase = selectBaseFinancial(baseFinancials);
+  const latestRevenue = selectedBase?.revenue ?? standardizedLatestRevenue?.value ?? inferredRevenue.value;
+  const latestRevenueSource = selectedBase?.source ?? (standardizedLatestRevenue ? "Standardized income statement" : inferredRevenue.source);
+  const latestRevenueReportDate = selectedBase?.reportDate ?? standardizedLatestRevenue?.reportDate ?? nullableString(latestRatioRow?.reportDate);
+  const latestRevenueYear = selectedBase?.period === "annual" ? standardizedLatestRevenue?.year ?? null : null;
 
   const fiveYearsAgo = revenueHistory.length >= 6 ? revenueHistory.at(-6) ?? null : null;
   const standardizedRevenueCagr = standardizedLatestRevenue && fiveYearsAgo ? cagr(fiveYearsAgo.value, standardizedLatestRevenue.value, 5) : null;
@@ -129,7 +124,10 @@ function deriveFinancialSnapshot(
       ? "Data fallback: growth_revenue_5y_cagr"
       : null;
 
-  const marginDefault = chooseNormalizedFcfMargin(fcfHistory, ratios);
+  const ltmMargin = baseFinancials.ltm?.fcfMargin ?? null;
+  const marginDefault = isPositive(ltmMargin)
+    ? { value: ltmMargin, source: "LTM FCF / LTM revenue" }
+    : chooseNormalizedFcfMargin(fcfHistory, ratios);
   const terminalGrowthDefault = normalizeTerminalGrowth(historicalRevenueCagr5y);
   const discountRateDefault = defaultDiscountRate(typeof profile.sector === "string" ? profile.sector : null);
 
@@ -138,6 +136,8 @@ function deriveFinancialSnapshot(
     latestRevenueYear,
     latestRevenueReportDate,
     historicalRevenueCagr5y,
+    basePeriodDefault: selectedBase?.period ?? null,
+    baseFinancials,
     normalizedFcfMarginDefault: marginDefault.value,
     terminalGrowthDefault,
     discountRateDefault,
@@ -148,6 +148,67 @@ function deriveFinancialSnapshot(
     fcfHistory,
     sourceLinks: extractSourceLinks(income)
   };
+}
+
+export function buildFinancialBases(incomeRows: StandardizedRow[], cashFlowRows: StandardizedRow[]): {
+  ltm: FinancialBase | null;
+  annual: FinancialBase | null;
+} {
+  return {
+    ltm: buildFinancialBase("ltm", incomeRows, cashFlowRows),
+    annual: buildFinancialBase("annual", incomeRows, cashFlowRows)
+  };
+}
+
+function buildFinancialBase(period: BasePeriod, incomeRows: StandardizedRow[], cashFlowRows: StandardizedRow[]): FinancialBase | null {
+  const periodType = period === "ltm" ? "LTM" : "Annual";
+  const incomeRow = latestPeriodRow(incomeRows, periodType);
+  const cashFlowRow = latestPeriodRow(cashFlowRows, periodType, incomeRow?.reportDate);
+  if (!incomeRow && !cashFlowRow) return null;
+  const revenue = numberOrNull(incomeRow?.metricsValues.income_statement_total_revenues?.value);
+  const fcf = cashFlowRow ? freeCashFlowFromRow(cashFlowRow) : null;
+  return {
+    period,
+    label: period === "ltm" ? "LTM" : "Latest Annual",
+    revenue,
+    fcf,
+    fcfMargin: revenue && revenue > 0 && fcf !== null ? fcf / revenue : null,
+    reportDate: nullableString(incomeRow?.reportDate ?? cashFlowRow?.reportDate),
+    source: period === "ltm" ? "Fiscal standardized LTM financials" : "Fiscal standardized annual financials"
+  };
+}
+
+function latestPeriodRow(rows: StandardizedRow[], periodType: string, reportDate?: string): StandardizedRow | null {
+  const filtered = rows.filter((row) => row.periodType === periodType);
+  if (reportDate) {
+    const exact = filtered.find((row) => row.reportDate === reportDate);
+    if (exact) return exact;
+  }
+  return filtered.sort((a, b) => a.reportDate.localeCompare(b.reportDate)).at(-1) ?? null;
+}
+
+function selectBaseFinancial(bases: { ltm: FinancialBase | null; annual: FinancialBase | null }): FinancialBase | null {
+  if (hasCompleteBase(bases.ltm)) return bases.ltm;
+  if (hasCompleteBase(bases.annual)) return bases.annual;
+  return bases.ltm ?? bases.annual;
+}
+
+function hasCompleteBase(base: FinancialBase | null): base is FinancialBase {
+  return Boolean(base && isPositive(base.revenue) && Number.isFinite(base.fcf) && Number.isFinite(base.fcfMargin));
+}
+
+function freeCashFlowFromRow(row: StandardizedRow): number | null {
+  const operatingCashFlow = pickValue(row.metricsValues, [
+    "cash_flow_statement_net_cash_from_operating_activities",
+    "cash_flow_statement_cash_from_operating_activities"
+  ]);
+  const capex = pickValue(row.metricsValues, [
+    "cash_flow_statement_purchases_of_property_plant_and_equipment",
+    "cash_flow_statement_purchase_of_property_plant_and_equipment",
+    "cash_flow_statement_capital_expenditures",
+    "cash_flow_statement_net_capital_expenditure"
+  ]);
+  return operatingCashFlow !== null && capex !== null ? operatingCashFlow + capex : null;
 }
 
 function chooseNormalizedFcfMargin(

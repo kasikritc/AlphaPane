@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { AssumptionSet, AssumptionSources, ColumnPreference, CompanyDetail, CompanyRow, ModelCell, RefreshRun, ValuationDetail, ValuationHistoryPoint, ValuationMetricKey, ValuationMetricStats, ValuationRow } from "@alphapane/shared";
+import type { AssumptionSet, AssumptionSources, BasePeriod, ColumnPreference, CompanyDetail, CompanyRow, FinancialBase, ModelCell, RefreshRun, ValuationDetail, ValuationHistoryPoint, ValuationMetricKey, ValuationMetricStats, ValuationRow } from "@alphapane/shared";
 import { TRIAL_COMPANIES } from "@alphapane/shared";
 import { buildModel, median } from "./math.js";
 import { VALUATION_RATIOS } from "./valuation.js";
@@ -22,12 +22,15 @@ interface JoinedCompany {
   ev_to_revenue: number | null;
   latest_revenue: number | null;
   historical_revenue_cagr_5y: number | null;
+  base_period_default: string | null;
+  base_financials_json: string | null;
   normalized_fcf_margin_default: number | null;
   normalized_fcf_margin_source: string | null;
   latest_revenue_source: string | null;
   historical_revenue_cagr_5y_source: string | null;
   discount_rate_default: number | null;
   terminal_growth_default: number | null;
+  override_base_period: string | null;
   override_margin: number | null;
   override_discount_rate: number | null;
   override_terminal_growth: number | null;
@@ -50,8 +53,8 @@ export function getCompanyDetail(db: DatabaseSync, companyKey: string): CompanyD
   const joined = db.prepare(`${rowSql()} WHERE c.company_key = ?`).get(companyKey) as unknown as JoinedCompany | undefined;
   if (!joined) return null;
   const financial = db
-    .prepare("SELECT revenue_history_json, fcf_history_json, source_links_json FROM financial_snapshots WHERE company_key = ?")
-    .get(companyKey) as { revenue_history_json?: string; fcf_history_json?: string; source_links_json?: string } | undefined;
+    .prepare("SELECT base_financials_json, revenue_history_json, fcf_history_json, source_links_json FROM financial_snapshots WHERE company_key = ?")
+    .get(companyKey) as { base_financials_json?: string; revenue_history_json?: string; fcf_history_json?: string; source_links_json?: string } | undefined;
   const model = db
     .prepare("SELECT model_grid_json FROM model_outputs WHERE company_key = ?")
     .get(companyKey) as { model_grid_json?: string } | undefined;
@@ -59,12 +62,15 @@ export function getCompanyDetail(db: DatabaseSync, companyKey: string): CompanyD
   const overrides = getAssumptionOverrides(joined);
   const defaults = getAssumptionDefaults(joined);
   const gridRows = markOverrides(parseJson<ModelCell[]>(model?.model_grid_json, []), overrides);
+  const bases = parseBaseFinancials(financial?.base_financials_json ?? joined.base_financials_json);
+  const selected = selectBasePeriod(overrides.basePeriod ?? defaults.basePeriod, bases);
 
   return {
     row: toCompanyRow(joined),
     defaults,
     overrides,
     sources: getAssumptionSources(joined),
+    baseFinancials: { selected, ...bases },
     gridColumns: GRID_COLUMNS,
     gridRows,
     revenueHistory: parseJson(financial?.revenue_history_json, []),
@@ -92,6 +98,7 @@ export function saveCompanyState(db: DatabaseSync, companyKey: string, input: { 
 export function saveAssumptions(db: DatabaseSync, companyKey: string, input: Partial<AssumptionSet>): void {
   const current = db.prepare("SELECT * FROM assumption_overrides WHERE company_key = ?").get(companyKey) as
     | {
+        base_period: string | null;
         normalized_fcf_margin: number | null;
         discount_rate: number | null;
         terminal_growth: number | null;
@@ -99,16 +106,18 @@ export function saveAssumptions(db: DatabaseSync, companyKey: string, input: Par
     | undefined;
   db.prepare(`
     INSERT INTO assumption_overrides (
-      company_key, normalized_fcf_margin, discount_rate, terminal_growth, updated_at
+      company_key, base_period, normalized_fcf_margin, discount_rate, terminal_growth, updated_at
     )
-    VALUES (?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?)
     ON CONFLICT(company_key) DO UPDATE SET
+      base_period = excluded.base_period,
       normalized_fcf_margin = excluded.normalized_fcf_margin,
       discount_rate = excluded.discount_rate,
       terminal_growth = excluded.terminal_growth,
       updated_at = excluded.updated_at
   `).run(
     companyKey,
+    cleanBasePeriod(input.basePeriod, cleanBasePeriod(current?.base_period, null)),
     cleanNumber(input.normalizedFcfMargin, current?.normalized_fcf_margin ?? null),
     cleanNumber(input.discountRate, current?.discount_rate ?? null),
     cleanNumber(input.terminalGrowth, current?.terminal_growth ?? null),
@@ -122,6 +131,8 @@ export function backfillFallbacksFromCache(db: DatabaseSync): void {
     SELECT
       c.company_key,
       f.latest_revenue,
+      f.base_period_default,
+      f.base_financials_json,
       f.historical_revenue_cagr_5y,
       f.normalized_fcf_margin_default,
       f.revenue_history_json,
@@ -332,6 +343,8 @@ export function upsertFinancialSnapshot(
     latestRevenueYear: number | null;
     latestRevenueReportDate: string | null;
     historicalRevenueCagr5y: number | null;
+    basePeriodDefault: BasePeriod | null;
+    baseFinancials: { ltm: FinancialBase | null; annual: FinancialBase | null };
     normalizedFcfMarginDefault: number | null;
     terminalGrowthDefault: number | null;
     discountRateDefault: number | null;
@@ -346,17 +359,19 @@ export function upsertFinancialSnapshot(
   db.prepare(`
     INSERT INTO financial_snapshots (
       company_key, latest_revenue, latest_revenue_year, latest_revenue_report_date,
-      historical_revenue_cagr_5y, normalized_fcf_margin_default, normalized_fcf_margin_source,
+      historical_revenue_cagr_5y, base_period_default, base_financials_json, normalized_fcf_margin_default, normalized_fcf_margin_source,
       latest_revenue_source, historical_revenue_cagr_5y_source,
       terminal_growth_default, discount_rate_default, revenue_history_json,
       fcf_history_json, source_links_json, updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(company_key) DO UPDATE SET
       latest_revenue = excluded.latest_revenue,
       latest_revenue_year = excluded.latest_revenue_year,
       latest_revenue_report_date = excluded.latest_revenue_report_date,
       historical_revenue_cagr_5y = excluded.historical_revenue_cagr_5y,
+      base_period_default = excluded.base_period_default,
+      base_financials_json = excluded.base_financials_json,
       normalized_fcf_margin_default = excluded.normalized_fcf_margin_default,
       normalized_fcf_margin_source = excluded.normalized_fcf_margin_source,
       latest_revenue_source = excluded.latest_revenue_source,
@@ -373,6 +388,8 @@ export function upsertFinancialSnapshot(
     input.latestRevenueYear,
     input.latestRevenueReportDate,
     input.historicalRevenueCagr5y,
+    input.basePeriodDefault,
+    JSON.stringify(input.baseFinancials),
     input.normalizedFcfMarginDefault,
     input.normalizedFcfMarginSource,
     input.latestRevenueSource,
@@ -392,7 +409,10 @@ export function recomputeModels(db: DatabaseSync, companyKeys: readonly string[]
       c.company_key,
       m.enterprise_value,
       f.latest_revenue,
+      f.base_period_default,
+      f.base_financials_json,
       f.historical_revenue_cagr_5y,
+      COALESCE(a.base_period, f.base_period_default) AS base_period,
       COALESCE(a.normalized_fcf_margin, f.normalized_fcf_margin_default) AS normalized_fcf_margin,
       COALESCE(a.discount_rate, f.discount_rate_default) AS discount_rate,
       COALESCE(a.terminal_growth, f.terminal_growth_default) AS terminal_growth
@@ -420,9 +440,11 @@ export function recomputeModels(db: DatabaseSync, companyKeys: readonly string[]
   for (const companyKey of companyKeys) {
     const row = statement.get(companyKey) as Record<string, unknown> | undefined;
     if (!row) continue;
+    const bases = parseBaseFinancials(stringOrUndefined(row.base_financials_json));
+    const base = baseByPeriod(cleanBasePeriod(row.base_period, null), bases);
     const output = buildModel({
       enterpriseValue: numberOrNull(row.enterprise_value),
-      baseRevenue: numberOrNull(row.latest_revenue),
+      baseRevenue: numberOrNull(base?.revenue) ?? numberOrNull(row.latest_revenue),
       normalizedFcfMargin: numberOrNull(row.normalized_fcf_margin),
       discountRate: numberOrNull(row.discount_rate),
       terminalGrowth: numberOrNull(row.terminal_growth),
@@ -447,10 +469,11 @@ function rowSql(): string {
       c.company_key, c.ticker, c.exchange, c.name, c.sector, c.industry,
       c.reporting_template, c.terminal_url, c.caution,
       m.share_price, m.enterprise_value, m.ev_to_revenue, m.updated_at AS prices_updated_at,
-      f.latest_revenue, f.historical_revenue_cagr_5y, f.normalized_fcf_margin_default,
-      f.normalized_fcf_margin_source, f.latest_revenue_source, f.historical_revenue_cagr_5y_source,
+      f.latest_revenue, f.historical_revenue_cagr_5y, f.base_period_default, f.base_financials_json,
+      f.normalized_fcf_margin_default, f.normalized_fcf_margin_source, f.latest_revenue_source, f.historical_revenue_cagr_5y_source,
       f.discount_rate_default, f.terminal_growth_default,
       f.updated_at AS financials_updated_at,
+      a.base_period AS override_base_period,
       a.normalized_fcf_margin AS override_margin,
       a.discount_rate AS override_discount_rate,
       a.terminal_growth AS override_terminal_growth,
@@ -468,6 +491,9 @@ function rowSql(): string {
 
 function toCompanyRow(row: JoinedCompany): CompanyRow {
   const normalizedFcfMargin = row.override_margin ?? row.normalized_fcf_margin_default;
+  const basePeriod = cleanBasePeriod(row.override_base_period, cleanBasePeriod(row.base_period_default, null));
+  const bases = parseBaseFinancials(row.base_financials_json ?? undefined);
+  const selectedBase = baseByPeriod(basePeriod, bases);
   const discountRate = row.override_discount_rate ?? row.discount_rate_default;
   const terminalGrowth = row.override_terminal_growth ?? row.terminal_growth_default;
   return {
@@ -481,13 +507,13 @@ function toCompanyRow(row: JoinedCompany): CompanyRow {
     terminalUrl: row.terminal_url,
     sharePrice: numberOrNull(row.share_price),
     enterpriseValue: numberOrNull(row.enterprise_value),
-    latestRevenue: numberOrNull(row.latest_revenue),
+    latestRevenue: numberOrNull(selectedBase?.revenue) ?? numberOrNull(row.latest_revenue),
     evToRevenue: numberOrNull(row.ev_to_revenue),
     historicalRevenueCagr5y: numberOrNull(row.historical_revenue_cagr_5y),
     normalizedFcfMargin: numberOrNull(normalizedFcfMargin),
     discountRate: numberOrNull(discountRate),
     terminalGrowth: numberOrNull(terminalGrowth),
-    latestRevenueSource: row.latest_revenue_source,
+    latestRevenueSource: selectedBase?.source ?? row.latest_revenue_source,
     normalizedFcfMarginSource: row.override_margin !== null ? "User override" : row.normalized_fcf_margin_source,
     historicalRevenueCagrSource: row.historical_revenue_cagr_5y_source,
     impliedRevenueCagr: numberOrNull(row.implied_revenue_cagr),
@@ -504,7 +530,7 @@ function toCompanyRow(row: JoinedCompany): CompanyRow {
 
 function getAssumptionSources(row: JoinedCompany): AssumptionSources {
   return {
-    latestRevenue: row.latest_revenue_source,
+    latestRevenue: baseByPeriod(cleanBasePeriod(row.override_base_period, cleanBasePeriod(row.base_period_default, null)), parseBaseFinancials(row.base_financials_json ?? undefined))?.source ?? row.latest_revenue_source,
     normalizedFcfMargin: row.override_margin !== null ? "User override" : row.normalized_fcf_margin_source,
     historicalRevenueCagr5y: row.historical_revenue_cagr_5y_source
   };
@@ -512,6 +538,7 @@ function getAssumptionSources(row: JoinedCompany): AssumptionSources {
 
 function getAssumptionDefaults(row: JoinedCompany): AssumptionSet {
   return {
+    basePeriod: cleanBasePeriod(row.base_period_default, null),
     normalizedFcfMargin: numberOrNull(row.normalized_fcf_margin_default),
     discountRate: numberOrNull(row.discount_rate_default),
     terminalGrowth: numberOrNull(row.terminal_growth_default)
@@ -520,14 +547,55 @@ function getAssumptionDefaults(row: JoinedCompany): AssumptionSet {
 
 function getAssumptionOverrides(row: JoinedCompany): AssumptionSet {
   return {
+    basePeriod: cleanBasePeriod(row.override_base_period, null),
     normalizedFcfMargin: numberOrNull(row.override_margin),
     discountRate: numberOrNull(row.override_discount_rate),
     terminalGrowth: numberOrNull(row.override_terminal_growth)
   };
 }
 
+
+function parseBaseFinancials(value: string | null | undefined): { ltm: FinancialBase | null; annual: FinancialBase | null } {
+  const parsed = parseJson<Partial<Record<BasePeriod, FinancialBase>>>(value ?? undefined, {});
+  return {
+    ltm: normalizeBase(parsed.ltm, "ltm"),
+    annual: normalizeBase(parsed.annual, "annual")
+  };
+}
+
+function normalizeBase(base: FinancialBase | undefined, period: BasePeriod): FinancialBase | null {
+  if (!base) return null;
+  return {
+    period,
+    label: typeof base.label === "string" ? base.label : period === "ltm" ? "LTM" : "Latest Annual",
+    revenue: numberOrNull(base.revenue),
+    fcf: numberOrNull(base.fcf),
+    fcfMargin: numberOrNull(base.fcfMargin),
+    reportDate: nullableString(base.reportDate),
+    source: nullableString(base.source)
+  };
+}
+
+function selectBasePeriod(period: BasePeriod | null, bases: { ltm: FinancialBase | null; annual: FinancialBase | null }): BasePeriod | null {
+  if (period && baseByPeriod(period, bases)) return period;
+  if (bases.ltm) return "ltm";
+  if (bases.annual) return "annual";
+  return null;
+}
+
+function baseByPeriod(period: BasePeriod | null, bases: { ltm: FinancialBase | null; annual: FinancialBase | null }): FinancialBase | null {
+  if (period === "ltm") return bases.ltm;
+  if (period === "annual") return bases.annual;
+  return bases.ltm ?? bases.annual;
+}
+
+function cleanBasePeriod(value: unknown, fallback: BasePeriod | null): BasePeriod | null {
+  return value === "ltm" || value === "annual" ? value : fallback;
+}
+
 function markOverrides(rows: ModelCell[], overrides: AssumptionSet): ModelCell[] {
   const labels: Record<string, keyof AssumptionSet> = {
+    "Base period": "basePeriod",
     "Normalized FCF margin": "normalizedFcfMargin",
     "Discount rate": "discountRate",
     "Terminal growth": "terminalGrowth"

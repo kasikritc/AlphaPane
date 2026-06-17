@@ -510,6 +510,7 @@ th:focus-within .move-button:not(:disabled) {
 }
 
 .assumption-grid input,
+.assumption-grid select,
 textarea {
   width: 100%;
   border: 1px solid #c8cec4;
@@ -520,6 +521,15 @@ textarea {
 
 .primary-action {
   margin-top: 10px;
+}
+
+.base-financials {
+  margin-top: 10px;
+}
+
+.base-financials td:last-child {
+  white-space: normal;
+  color: #5b6258;
 }
 
 .model-grid-wrap {

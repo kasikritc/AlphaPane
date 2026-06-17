@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { ArrowDownUp, ChevronDown, Columns3, DatabaseZap, RefreshCw, Search, Star } from "lucide-react";
 import type {
+  BasePeriod,
   ColumnPreference,
   CompanyDetail,
   CompanyRow,
@@ -390,6 +391,7 @@ function DataTable<Row extends BaseRow>({ rows, columns, loading, selectedKey, s
 function ReverseDcfDetailView({ detail, onSaved }: { detail: CompanyDetail; onSaved: () => Promise<void> }) {
   const [note, setNote] = useState(detail.row.note);
   const [assumptions, setAssumptions] = useState({
+    basePeriod: detail.overrides.basePeriod ?? detail.defaults.basePeriod ?? detail.baseFinancials.selected,
     normalizedFcfMargin: detail.overrides.normalizedFcfMargin ?? detail.defaults.normalizedFcfMargin,
     discountRate: detail.overrides.discountRate ?? detail.defaults.discountRate,
     terminalGrowth: detail.overrides.terminalGrowth ?? detail.defaults.terminalGrowth
@@ -398,7 +400,8 @@ function ReverseDcfDetailView({ detail, onSaved }: { detail: CompanyDetail; onSa
   useEffect(() => {
     setNote(detail.row.note);
     setAssumptions({
-      normalizedFcfMargin: detail.overrides.normalizedFcfMargin ?? detail.defaults.normalizedFcfMargin,
+      basePeriod: detail.overrides.basePeriod ?? detail.defaults.basePeriod ?? detail.baseFinancials.selected,
+    normalizedFcfMargin: detail.overrides.normalizedFcfMargin ?? detail.defaults.normalizedFcfMargin,
       discountRate: detail.overrides.discountRate ?? detail.defaults.discountRate,
       terminalGrowth: detail.overrides.terminalGrowth ?? detail.defaults.terminalGrowth
     });
@@ -425,6 +428,19 @@ function ReverseDcfDetailView({ detail, onSaved }: { detail: CompanyDetail; onSa
         <Metric label="EV/Rev" value={multiple(detail.row.evToRevenue)} />
       </div>
       <section className="section">
+        <h3>Base Financials</h3>
+        <div className="assumption-grid">
+          <label>Base period
+            <select value={assumptions.basePeriod ?? ""} onChange={(event) => setAssumptions({ ...assumptions, basePeriod: parseBasePeriod(event.target.value) })}>
+              <option value="" disabled>Select base</option>
+              <option value="ltm" disabled={!detail.baseFinancials.ltm}>LTM</option>
+              <option value="annual" disabled={!detail.baseFinancials.annual}>Latest Annual</option>
+            </select>
+          </label>
+        </div>
+        <BaseFinancialsTable detail={detail} selected={assumptions.basePeriod} />
+      </section>
+      <section className="section">
         <h3>Assumptions</h3>
         <div className="assumption-grid">
           <InputPercent label="FCF margin" value={assumptions.normalizedFcfMargin} onChange={(value) => setAssumptions({ ...assumptions, normalizedFcfMargin: value })} />
@@ -438,6 +454,24 @@ function ReverseDcfDetailView({ detail, onSaved }: { detail: CompanyDetail; onSa
       <NoteSection note={note} setNote={setNote} saveNote={saveNote} />
       <SourcesSection links={detail.sourceLinks} terminalUrl={detail.row.terminalUrl} />
     </>
+  );
+}
+
+
+function BaseFinancialsTable({ detail, selected }: { detail: CompanyDetail; selected: BasePeriod | null }) {
+  const base = selected === "annual" ? detail.baseFinancials.annual : detail.baseFinancials.ltm ?? detail.baseFinancials.annual;
+  return (
+    <div className="metric-table-wrap base-financials">
+      <table className="model-grid">
+        <tbody>
+          <tr><th>Input</th><th>Value</th><th>Source</th></tr>
+          <tr><td>Revenue base</td><td>{compactMoney(base?.revenue ?? null)}</td><td>{base?.source ?? "-"}</td></tr>
+          <tr><td>FCF base</td><td>{compactMoney(base?.fcf ?? null)}</td><td>{base?.source ?? "-"}</td></tr>
+          <tr><td>FCF margin</td><td>{percent(base?.fcfMargin ?? null)}</td><td>{detail.sources.normalizedFcfMargin ?? "-"}</td></tr>
+          <tr><td>Fiscal period</td><td>{base?.label ?? "-"}</td><td>{dateShort(base?.reportDate ?? null)}</td></tr>
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -609,6 +643,10 @@ function latestDate(values: Array<string | null>): string | null {
 
 function strong(value: string) {
   return <strong>{value}</strong>;
+}
+
+function parseBasePeriod(value: string): BasePeriod | null {
+  return value === "ltm" || value === "annual" ? value : null;
 }
 
 function parseInputPercent(value: string): number | null {

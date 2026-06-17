@@ -59,6 +59,7 @@ export function createApp(db: DatabaseSync) {
 
   app.patch("/api/companies/:companyKey/assumptions", (req, res) => {
     saveAssumptions(db, req.params.companyKey, {
+      basePeriod: cleanBasePeriod(req.body.basePeriod),
       normalizedFcfMargin: cleanPercent(req.body.normalizedFcfMargin),
       discountRate: cleanPercent(req.body.discountRate),
       terminalGrowth: cleanPercent(req.body.terminalGrowth)
@@ -96,6 +97,12 @@ export function createApp(db: DatabaseSync) {
   });
 
   return app;
+}
+
+function cleanBasePeriod(value: unknown): "ltm" | "annual" | null | undefined {
+  if (value === null) return null;
+  if (value === undefined || value === "") return undefined;
+  return value === "ltm" || value === "annual" ? value : undefined;
 }
 
 function cleanPercent(value: unknown): number | null | undefined {

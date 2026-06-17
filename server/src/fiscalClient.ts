@@ -40,11 +40,12 @@ export class FiscalClient {
 
   async standardizedFinancials(
     companyKey: string,
-    statementType: "income-statement" | "cash-flow-statement"
+    statementType: "income-statement" | "balance-sheet" | "cash-flow-statement",
+    periodType = "annual"
   ): Promise<Record<string, unknown>> {
     return this.request(`/v1/company/financials/${statementType}/standardized`, {
       companyKey,
-      periodType: "annual",
+      periodType,
       currency: "USD"
     });
   }

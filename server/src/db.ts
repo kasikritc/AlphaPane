@@ -99,6 +99,8 @@ function migrate(db: DatabaseSync): void {
       latest_revenue_year INTEGER,
       latest_revenue_report_date TEXT,
       historical_revenue_cagr_5y REAL,
+      base_period_default TEXT,
+      base_financials_json TEXT NOT NULL DEFAULT '{}',
       normalized_fcf_margin_default REAL,
       normalized_fcf_margin_source TEXT,
       latest_revenue_source TEXT,
@@ -113,6 +115,7 @@ function migrate(db: DatabaseSync): void {
 
     CREATE TABLE IF NOT EXISTS assumption_overrides (
       company_key TEXT PRIMARY KEY REFERENCES companies(company_key) ON DELETE CASCADE,
+      base_period TEXT,
       normalized_fcf_margin REAL,
       discount_rate REAL,
       terminal_growth REAL,
@@ -162,9 +165,12 @@ function migrate(db: DatabaseSync): void {
   `);
   addColumnIfMissing(db, 'market_snapshots', 'ev_to_ebitda', 'REAL');
   addColumnIfMissing(db, 'market_snapshots', 'fcf_yield', 'REAL');
+  addColumnIfMissing(db, 'financial_snapshots', 'base_period_default', 'TEXT');
+  addColumnIfMissing(db, 'financial_snapshots', 'base_financials_json', "TEXT NOT NULL DEFAULT '{}'");
   addColumnIfMissing(db, 'financial_snapshots', 'normalized_fcf_margin_source', 'TEXT');
   addColumnIfMissing(db, 'financial_snapshots', 'latest_revenue_source', 'TEXT');
   addColumnIfMissing(db, 'financial_snapshots', 'historical_revenue_cagr_5y_source', 'TEXT');
+  addColumnIfMissing(db, 'assumption_overrides', 'base_period', 'TEXT');
 }
 
 function addColumnIfMissing(db: DatabaseSync, table: string, column: string, definition: string): void {

@@ -136,7 +136,20 @@ export interface ValuationDetail {
   peBandLevels: Record<string, number | null>;
 }
 
+export type BasePeriod = 'ltm' | 'annual';
+
+export interface FinancialBase {
+  period: BasePeriod;
+  label: string;
+  revenue: number | null;
+  fcf: number | null;
+  fcfMargin: number | null;
+  reportDate: string | null;
+  source: string | null;
+}
+
 export interface AssumptionSet {
+  basePeriod: BasePeriod | null;
   normalizedFcfMargin: number | null;
   discountRate: number | null;
   terminalGrowth: number | null;
@@ -160,6 +173,11 @@ export interface CompanyDetail {
   defaults: AssumptionSet;
   overrides: AssumptionSet;
   sources: AssumptionSources;
+  baseFinancials: {
+    selected: BasePeriod | null;
+    ltm: FinancialBase | null;
+    annual: FinancialBase | null;
+  };
   gridColumns: string[];
   gridRows: ModelCell[];
   revenueHistory: Array<{ year: number; value: number; reportDate: string }>;
