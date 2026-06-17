@@ -139,6 +139,14 @@ function migrate(db: DatabaseSync): void {
       updated_at TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS valuation_snapshots (
+      company_key TEXT PRIMARY KEY REFERENCES companies(company_key) ON DELETE CASCADE,
+      metrics_json TEXT NOT NULL DEFAULT '{}',
+      pe_history_json TEXT NOT NULL DEFAULT '[]',
+      pe_band_levels_json TEXT NOT NULL DEFAULT '{}',
+      updated_at TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS preferences (
       key TEXT PRIMARY KEY,
       value_json TEXT NOT NULL,

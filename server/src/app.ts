@@ -6,6 +6,8 @@ import {
   getCompanyDetail,
   getCompanyRows,
   getRefreshRuns,
+  getValuationDetail,
+  getValuationRows,
   saveAssumptions,
   saveColumnPreferences,
   saveCompanyState
@@ -22,11 +24,24 @@ export function createApp(db: DatabaseSync) {
   });
 
   app.get("/api/companies", (_req, res) => {
-    res.json({ rows: getCompanyRows(db), columns: getColumnPreferences(db) });
+    res.json({ rows: getCompanyRows(db), columns: getColumnPreferences(db, "reverseDcfColumns") });
   });
 
   app.get("/api/companies/:companyKey", (req, res) => {
     const detail = getCompanyDetail(db, req.params.companyKey);
+    if (!detail) {
+      res.status(404).json({ error: "Company not found." });
+      return;
+    }
+    res.json(detail);
+  });
+
+  app.get("/api/valuation/companies", (_req, res) => {
+    res.json({ rows: getValuationRows(db), columns: getColumnPreferences(db, "historicalValuationColumns") });
+  });
+
+  app.get("/api/valuation/companies/:companyKey", (req, res) => {
+    const detail = getValuationDetail(db, req.params.companyKey);
     if (!detail) {
       res.status(404).json({ error: "Company not found." });
       return;
@@ -54,8 +69,9 @@ export function createApp(db: DatabaseSync) {
 
   app.patch("/api/preferences/columns", (req, res) => {
     const columns = Array.isArray(req.body.columns) ? req.body.columns : [];
-    saveColumnPreferences(db, columns);
-    res.json({ columns: getColumnPreferences(db) });
+    const key = req.body.key === "historicalValuationColumns" ? "historicalValuationColumns" : "reverseDcfColumns";
+    saveColumnPreferences(db, columns, key);
+    res.json({ columns: getColumnPreferences(db, key) });
   });
 
   app.get("/api/refresh-runs", (_req, res) => {
@@ -65,7 +81,7 @@ export function createApp(db: DatabaseSync) {
   app.post("/api/refresh/prices", async (_req, res) => {
     try {
       await refreshPrices(db);
-      res.json({ ok: true, rows: getCompanyRows(db), runs: getRefreshRuns(db) });
+      res.json({ ok: true, rows: getCompanyRows(db), valuationRows: getValuationRows(db), runs: getRefreshRuns(db) });
     } catch (error) {
       res.status(500).json({ error: errorMessage(error), runs: getRefreshRuns(db) });
     }
@@ -74,7 +90,7 @@ export function createApp(db: DatabaseSync) {
   app.post("/api/refresh/financials", async (_req, res) => {
     try {
       await refreshFinancials(db);
-      res.json({ ok: true, rows: getCompanyRows(db), runs: getRefreshRuns(db) });
+      res.json({ ok: true, rows: getCompanyRows(db), valuationRows: getValuationRows(db), runs: getRefreshRuns(db) });
     } catch (error) {
       res.status(500).json({ error: errorMessage(error), runs: getRefreshRuns(db) });
     }

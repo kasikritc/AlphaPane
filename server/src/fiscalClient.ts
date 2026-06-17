@@ -27,6 +27,8 @@ export class FiscalClient {
         "ratio_ev_to_sales",
         "ratio_price_to_sales",
         "ratio_price_to_earnings",
+        "ratio_ev_to_ebitda",
+        "ratio_fcf_yield",
         "calculated_fcf",
         "ratio_fcf_margin",
         "growth_revenue_1y",
@@ -49,6 +51,10 @@ export class FiscalClient {
 
   async dailyRatio(companyKey: string, ratioId: string): Promise<Array<Record<string, unknown>>> {
     return this.request(`/v1/company/ratios/daily/${ratioId}`, { companyKey, currency: "USD" });
+  }
+
+  async stockPrices(companyKey: string): Promise<Array<{ date: string; open_price: number; close_price: number; volume: number }>> {
+    return this.request("/v1/company/stock-prices", { companyKey });
   }
 
   private async request(path: string, query: Query): Promise<any> {

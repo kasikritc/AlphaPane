@@ -1,7 +1,9 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { AssumptionSet, AssumptionSources, ColumnPreference, CompanyDetail, CompanyRow, ModelCell, RefreshRun } from "@alphapane/shared";
+import type { AssumptionSet, AssumptionSources, ColumnPreference, CompanyDetail, CompanyRow, ModelCell, RefreshRun, ValuationDetail, ValuationHistoryPoint, ValuationMetricKey, ValuationMetricStats, ValuationRow } from "@alphapane/shared";
 import { TRIAL_COMPANIES } from "@alphapane/shared";
 import { buildModel, median } from "./math.js";
+import { VALUATION_RATIOS } from "./valuation.js";
+import type { ValuationSnapshotInput } from "./valuation.js";
 
 const GRID_COLUMNS = ["Base", "Y1", "Y2", "Y3", "Y4", "Y5", "Terminal / EV"];
 
@@ -239,17 +241,22 @@ function stringOrUndefined(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
-export function getColumnPreferences(db: DatabaseSync): ColumnPreference[] {
-  const row = db.prepare("SELECT value_json FROM preferences WHERE key = 'columns'").get() as { value_json?: string } | undefined;
-  return parseJson(row?.value_json, []);
+export function getColumnPreferences(db: DatabaseSync, key = "reverseDcfColumns"): ColumnPreference[] {
+  const row = db.prepare("SELECT value_json FROM preferences WHERE key = ?").get(key) as { value_json?: string } | undefined;
+  if (row?.value_json) return parseJson(row.value_json, []);
+  if (key === "reverseDcfColumns") {
+    const legacy = db.prepare("SELECT value_json FROM preferences WHERE key = ?").get("columns") as { value_json?: string } | undefined;
+    return parseJson(legacy?.value_json, []);
+  }
+  return [];
 }
 
-export function saveColumnPreferences(db: DatabaseSync, preferences: ColumnPreference[]): void {
+export function saveColumnPreferences(db: DatabaseSync, preferences: ColumnPreference[], key = "reverseDcfColumns"): void {
   db.prepare(`
     INSERT INTO preferences (key, value_json, updated_at)
-    VALUES ('columns', ?, ?)
+    VALUES (?, ?, ?)
     ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at
-  `).run(JSON.stringify(preferences), now());
+  `).run(key, JSON.stringify(preferences), now());
 }
 
 export function createRefreshRun(db: DatabaseSync, kind: "prices" | "financials"): number {
@@ -570,6 +577,121 @@ function markOverrides(rows: ModelCell[], overrides: AssumptionSet): ModelCell[]
     const overrideKey = labels[row.label];
     return overrideKey && overrides[overrideKey] !== null ? { ...row, kind: "override" } : row;
   });
+}
+
+
+interface ValuationJoined {
+  company_key: string;
+  ticker: string;
+  exchange: string;
+  name: string;
+  sector: string | null;
+  industry: string | null;
+  terminal_url: string | null;
+  share_price: number | null;
+  metrics_json?: string;
+  pe_history_json?: string;
+  pe_band_levels_json?: string;
+  valuation_updated_at: string | null;
+  is_favorite: number | null;
+  note: string | null;
+}
+
+export function upsertValuationSnapshot(db: DatabaseSync, companyKey: string, input: ValuationSnapshotInput): void {
+  db.prepare(`
+    INSERT INTO valuation_snapshots (company_key, metrics_json, pe_history_json, pe_band_levels_json, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(company_key) DO UPDATE SET
+      metrics_json = excluded.metrics_json,
+      pe_history_json = excluded.pe_history_json,
+      pe_band_levels_json = excluded.pe_band_levels_json,
+      updated_at = excluded.updated_at
+  `).run(
+    companyKey,
+    JSON.stringify(input.metrics),
+    JSON.stringify(input.peHistory),
+    JSON.stringify(input.peBandLevels),
+    now()
+  );
+}
+
+export function getValuationRows(db: DatabaseSync): ValuationRow[] {
+  const rows = db.prepare(valuationRowSql()).all() as unknown as ValuationJoined[];
+  return rows.map(toValuationRow).sort((a, b) => compareNullable(a.pe.zScore, b.pe.zScore));
+}
+
+export function getValuationDetail(db: DatabaseSync, companyKey: string): ValuationDetail | null {
+  const joined = db.prepare(`${valuationRowSql()} WHERE c.company_key = ?`).get(companyKey) as unknown as ValuationJoined | undefined;
+  if (!joined) return null;
+  const row = toValuationRow(joined);
+  return {
+    row,
+    metrics: [row.pe, row.evSales, row.evEbitda, row.priceSales, row.fcfYield],
+    peHistory: parseJson<ValuationHistoryPoint[]>(joined.pe_history_json, []),
+    peBandLevels: parseJson<Record<string, number | null>>(joined.pe_band_levels_json, {})
+  };
+}
+
+function valuationRowSql(): string {
+  return `
+    SELECT
+      c.company_key, c.ticker, c.exchange, c.name, c.sector, c.industry, c.terminal_url,
+      m.share_price,
+      v.metrics_json, v.pe_history_json, v.pe_band_levels_json, v.updated_at AS valuation_updated_at,
+      u.is_favorite, u.note
+    FROM companies c
+    LEFT JOIN market_snapshots m ON m.company_key = c.company_key
+    LEFT JOIN valuation_snapshots v ON v.company_key = c.company_key
+    LEFT JOIN user_company_state u ON u.company_key = c.company_key
+  `;
+}
+
+function toValuationRow(row: ValuationJoined): ValuationRow {
+  const metrics = completeMetrics(parseJson<Partial<Record<ValuationMetricKey, ValuationMetricStats>>>(row.metrics_json, {}));
+  return {
+    companyKey: row.company_key,
+    ticker: row.ticker,
+    exchange: row.exchange,
+    name: row.name,
+    sector: row.sector,
+    industry: row.industry,
+    terminalUrl: row.terminal_url,
+    sharePrice: numberOrNull(row.share_price),
+    pe: metrics.pe,
+    evSales: metrics.evSales,
+    evEbitda: metrics.evEbitda,
+    priceSales: metrics.priceSales,
+    fcfYield: metrics.fcfYield,
+    isFavorite: Boolean(row.is_favorite),
+    note: row.note ?? "",
+    valuationUpdatedAt: row.valuation_updated_at
+  };
+}
+
+function completeMetrics(input: Partial<Record<ValuationMetricKey, ValuationMetricStats>>): Record<ValuationMetricKey, ValuationMetricStats> {
+  return Object.fromEntries(VALUATION_RATIOS.map((config) => [config.key, input[config.key] ?? emptyMetric(config)])) as Record<ValuationMetricKey, ValuationMetricStats>;
+}
+
+function emptyMetric(config: (typeof VALUATION_RATIOS)[number]): ValuationMetricStats {
+  return {
+    key: config.key,
+    label: config.label,
+    ratioId: config.ratioId,
+    current: null,
+    mean: null,
+    stdDev: null,
+    zScore: null,
+    percentileRank: null,
+    observationCount: 0,
+    status: "insufficient data"
+  };
+}
+
+function compareNullable(a: number | null, b: number | null): number {
+  if (a === null && b === null) return 0;
+  if (a === null) return 1;
+  if (b === null) return -1;
+  return a - b;
 }
 
 function parseJson<T>(value: string | undefined, fallback: T): T {

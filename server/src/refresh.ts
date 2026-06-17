@@ -8,8 +8,10 @@ import {
   recomputeModels,
   upsertCompanyProfile,
   upsertFinancialSnapshot,
-  upsertMarketSnapshot
+  upsertMarketSnapshot,
+  upsertValuationSnapshot
 } from "./repository.js";
+import { buildValuationSnapshot, VALUATION_RATIOS } from "./valuation.js";
 
 interface StandardizedRow {
   reportDate: string;
@@ -24,6 +26,7 @@ export async function refreshPrices(db: DatabaseSync, client = new FiscalClient(
       const ratios = await client.companyRatios(companyKey, "latest");
       const latest = selectLatestRatioRow(ratios);
       upsertMarketSnapshot(db, companyKey, latest);
+      await refreshValuationSnapshot(db, companyKey, client);
     }
     recomputeModels(db);
     finishRefreshRun(db, runId, "success", `Updated market data for ${TRIAL_COMPANIES.length} companies.`);
@@ -54,6 +57,16 @@ export async function refreshFinancials(db: DatabaseSync, client = new FiscalCli
     finishRefreshRun(db, runId, "failed", errorMessage(error));
     throw error;
   }
+}
+
+
+async function refreshValuationSnapshot(db: DatabaseSync, companyKey: string, client: FiscalClient): Promise<void> {
+  const ratioEntries = await Promise.all(
+    VALUATION_RATIOS.map(async (config) => [config.key, await client.dailyRatio(companyKey, config.ratioId)] as const)
+  );
+  const ratiosByKey = Object.fromEntries(ratioEntries) as any;
+  const prices = await client.stockPrices(companyKey);
+  upsertValuationSnapshot(db, companyKey, buildValuationSnapshot(ratiosByKey, prices));
 }
 
 function deriveFinancialSnapshot(

@@ -88,6 +88,57 @@ export interface CompanyRow {
   caution: string | null;
 }
 
+
+export type DashboardTab = "reverseDcf" | "historicalValuation";
+
+export type ValuationMetricKey = "pe" | "evSales" | "evEbitda" | "priceSales" | "fcfYield";
+
+export interface ValuationMetricStats {
+  key: ValuationMetricKey;
+  label: string;
+  ratioId: string;
+  current: number | null;
+  mean: number | null;
+  stdDev: number | null;
+  zScore: number | null;
+  percentileRank: number | null;
+  observationCount: number;
+  status: "ok" | "insufficient data";
+}
+
+export interface ValuationHistoryPoint {
+  date: string;
+  price: number | null;
+  pe: number | null;
+  bandPrices: Record<string, number | null>;
+}
+
+export interface ValuationRow {
+  companyKey: string;
+  ticker: string;
+  exchange: string;
+  name: string;
+  sector: string | null;
+  industry: string | null;
+  terminalUrl: string | null;
+  sharePrice: number | null;
+  pe: ValuationMetricStats;
+  evSales: ValuationMetricStats;
+  evEbitda: ValuationMetricStats;
+  priceSales: ValuationMetricStats;
+  fcfYield: ValuationMetricStats;
+  isFavorite: boolean;
+  note: string;
+  valuationUpdatedAt: string | null;
+}
+
+export interface ValuationDetail {
+  row: ValuationRow;
+  metrics: ValuationMetricStats[];
+  peHistory: ValuationHistoryPoint[];
+  peBandLevels: Record<string, number | null>;
+}
+
 export interface AssumptionSet {
   normalizedFcfMargin: number | null;
   discountRate: number | null;
