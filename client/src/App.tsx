@@ -7,9 +7,12 @@ import type {
   CompanyDetail,
   CompanyRow,
   DashboardTab,
+  ExitMetric,
   ModelCell,
   ModelDiagnostics,
   RefreshRun,
+  SensitivityTable,
+  TerminalMethod,
   ValuationDetail,
   ValuationHistoryPoint,
   ValuationMetricStats,
@@ -391,22 +394,14 @@ function DataTable<Row extends BaseRow>({ rows, columns, loading, selectedKey, s
 
 function ReverseDcfDetailView({ detail, onSaved }: { detail: CompanyDetail; onSaved: () => Promise<void> }) {
   const [note, setNote] = useState(detail.row.note);
-  const [assumptions, setAssumptions] = useState({
-    basePeriod: detail.overrides.basePeriod ?? detail.defaults.basePeriod ?? detail.baseFinancials.selected,
-    normalizedFcfMargin: detail.overrides.normalizedFcfMargin ?? detail.defaults.normalizedFcfMargin,
-    discountRate: detail.overrides.discountRate ?? detail.defaults.discountRate,
-    terminalGrowth: detail.overrides.terminalGrowth ?? detail.defaults.terminalGrowth
-  });
+  const [assumptions, setAssumptions] = useState(() => initialAssumptions(detail));
 
   useEffect(() => {
     setNote(detail.row.note);
-    setAssumptions({
-      basePeriod: detail.overrides.basePeriod ?? detail.defaults.basePeriod ?? detail.baseFinancials.selected,
-    normalizedFcfMargin: detail.overrides.normalizedFcfMargin ?? detail.defaults.normalizedFcfMargin,
-      discountRate: detail.overrides.discountRate ?? detail.defaults.discountRate,
-      terminalGrowth: detail.overrides.terminalGrowth ?? detail.defaults.terminalGrowth
-    });
+    setAssumptions(initialAssumptions(detail));
   }, [detail]);
+
+  const isExitMode = assumptions.terminalMethod === "exit-multiple";
 
   async function saveNote() {
     await api(`/api/companies/${detail.row.companyKey}/state`, { method: "PATCH", body: JSON.stringify({ note }) });
@@ -428,6 +423,9 @@ function ReverseDcfDetailView({ detail, onSaved }: { detail: CompanyDetail; onSa
         <Metric label="Gap" value={percent(detail.row.cagrGap)} />
         <Metric label="EV/Rev" value={multiple(detail.row.evToRevenue)} />
       </div>
+      {isExitMode && Number.isFinite(detail.row.impliedRevenueCagr) && (
+        <p className="headline-note">Priced-in CAGR using {multiple(assumptions.exitMultiple)} terminal {exitMetricLabel(assumptions.exitMetric)} multiple: {percent(detail.row.impliedRevenueCagr)}</p>
+      )}
       <section className="section">
         <h3>Base Financials</h3>
         <div className="assumption-grid">
@@ -447,13 +445,38 @@ function ReverseDcfDetailView({ detail, onSaved }: { detail: CompanyDetail; onSa
         <div className="assumption-grid">
           <InputPercent label="FCF margin" value={assumptions.normalizedFcfMargin} onChange={(value) => setAssumptions({ ...assumptions, normalizedFcfMargin: value })} />
           <InputPercent label="Discount rate" value={assumptions.discountRate} onChange={(value) => setAssumptions({ ...assumptions, discountRate: value })} />
-          <InputPercent label="Terminal growth" value={assumptions.terminalGrowth} onChange={(value) => setAssumptions({ ...assumptions, terminalGrowth: value })} />
+          <label>Terminal method
+            <select value={assumptions.terminalMethod} onChange={(event) => setAssumptions({ ...assumptions, terminalMethod: parseTerminalMethod(event.target.value) })}>
+              <option value="perpetuity">Perpetuity Growth</option>
+              <option value="exit-multiple">Exit Multiple</option>
+            </select>
+          </label>
+          {!isExitMode && (
+            <InputPercent label="Terminal growth" value={assumptions.terminalGrowth} onChange={(value) => setAssumptions({ ...assumptions, terminalGrowth: value })} />
+          )}
+          {isExitMode && (
+            <label>Exit metric
+              <select value={assumptions.exitMetric} onChange={(event) => setAssumptions({ ...assumptions, exitMetric: parseExitMetric(event.target.value) })}>
+                <option value="fcf">FCF</option>
+                <option value="ebitda">EBITDA</option>
+                <option value="revenue">Revenue</option>
+              </select>
+            </label>
+          )}
+          {isExitMode && (
+            <InputNumber label="Exit multiple" value={assumptions.exitMultiple} onChange={(value) => setAssumptions({ ...assumptions, exitMultiple: value })} />
+          )}
+          {isExitMode && assumptions.exitMetric === "ebitda" && (
+            <InputPercent label="EBITDA margin" value={assumptions.normalizedEbitdaMargin} onChange={(value) => setAssumptions({ ...assumptions, normalizedEbitdaMargin: value })} />
+          )}
         </div>
+        {isExitMode && <ExitMultipleStatsTable detail={detail} metric={assumptions.exitMetric} />}
         <button className="primary-action" onClick={() => void saveAssumptions()}>Save assumptions</button>
       </section>
       <section className="section"><h3>Default Sources</h3><div className="source-grid"><Metric label="Revenue" value={detail.sources.latestRevenue ?? "-"} /><Metric label="FCF margin" value={detail.sources.normalizedFcfMargin ?? "-"} /><Metric label="History CAGR" value={detail.sources.historicalRevenueCagr5y ?? "-"} /></div></section>
       <section className="section"><h3>Model Grid</h3><ModelGrid detail={detail} /></section>
       <ModelDiagnosticsSection detail={detail} />
+      <SensitivitySection tables={detail.sensitivity} />
       <NoteSection note={note} setNote={setNote} saveNote={saveNote} />
       <SourcesSection links={detail.sourceLinks} terminalUrl={detail.row.terminalUrl} />
     </>
@@ -485,6 +508,60 @@ function ModelDiagnosticsSection({ detail }: { detail: CompanyDetail }) {
         </table>
       </div>
     </section>
+  );
+}
+
+function ExitMultipleStatsTable({ detail, metric }: { detail: CompanyDetail; metric: ExitMetric | null }) {
+  const stat = detail.exitMultipleStats.find((item) => item.metric === metric);
+  if (!stat) return null;
+  return (
+    <div className="metric-table-wrap base-financials">
+      <table className="model-grid">
+        <tbody>
+          <tr><th>{stat.label}</th><th>Value</th></tr>
+          <tr><td>Current</td><td>{multiple(stat.current)}</td></tr>
+          <tr><td>5Y low</td><td>{multiple(stat.low)}</td></tr>
+          <tr><td>5Y median</td><td>{multiple(stat.median)}</td></tr>
+          <tr><td>5Y high</td><td>{multiple(stat.high)}</td></tr>
+          <tr><td>Default source</td><td>{stat.source ?? "-"}</td></tr>
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function SensitivitySection({ tables }: { tables: SensitivityTable[] }) {
+  if (!tables || tables.length === 0) return null;
+  return (
+    <section className="section">
+      <h3>Sensitivity</h3>
+      {tables.map((table) => <SensitivityTableView key={table.title} table={table} />)}
+    </section>
+  );
+}
+
+function SensitivityTableView({ table }: { table: SensitivityTable }) {
+  const fmt = (value: number | null, format: SensitivityTable["rowFormat"]) => format === "multiple" ? multiple(value) : percent(value);
+  return (
+    <div className="model-grid-wrap" style={{ marginBottom: 12 }}>
+      <p className="headline-note">{table.title}</p>
+      <table className="model-grid">
+        <thead>
+          <tr>
+            <th>{table.rowLabel} \ {table.colLabel}</th>
+            {table.colValues.map((value, index) => <th key={index}>{fmt(value, table.colFormat)}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {table.rowValues.map((rowValue, rowIndex) => (
+            <tr key={rowIndex}>
+              <td>{fmt(rowValue, table.rowFormat)}</td>
+              {table.colValues.map((_, colIndex) => <td key={colIndex}>{percent(table.cells[rowIndex]?.[colIndex] ?? null)}</td>)}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -640,6 +717,13 @@ function InputPercent({ label, value, onChange }: { label: string; value: number
   return <label>{label}<input type="number" step="0.1" value={value === null ? "" : (value * 100).toFixed(1)} onChange={(event) => onChange(parseInputPercent(event.target.value))} /></label>;
 }
 
+function InputNumber({ label, value, onChange }: { label: string; value: number | null; onChange: (value: number | null) => void }) {
+  return <label>{label}<input type="number" step="0.1" value={value === null ? "" : Number(value).toFixed(1)} onChange={(event) => {
+    const next = Number(event.target.value);
+    onChange(event.target.value === "" || !Number.isFinite(next) ? null : next);
+  }} /></label>;
+}
+
 async function api<T = unknown>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, { ...init, headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) } });
   const payload = await response.json().catch(() => ({}));
@@ -714,8 +798,40 @@ function strong(value: string) {
   return <strong>{value}</strong>;
 }
 
+function initialAssumptions(detail: CompanyDetail) {
+  return {
+    basePeriod: detail.overrides.basePeriod ?? detail.defaults.basePeriod ?? detail.baseFinancials.selected,
+    normalizedFcfMargin: detail.overrides.normalizedFcfMargin ?? detail.defaults.normalizedFcfMargin,
+    discountRate: detail.overrides.discountRate ?? detail.defaults.discountRate,
+    terminalGrowth: detail.overrides.terminalGrowth ?? detail.defaults.terminalGrowth,
+    terminalMethod: detail.overrides.terminalMethod ?? detail.defaults.terminalMethod ?? "perpetuity",
+    exitMetric: detail.overrides.exitMetric ?? detail.defaults.exitMetric ?? "fcf",
+    exitMultiple: detail.overrides.exitMultiple ?? detail.defaults.exitMultiple,
+    normalizedEbitdaMargin: detail.overrides.normalizedEbitdaMargin ?? detail.defaults.normalizedEbitdaMargin
+  };
+}
+
 function parseBasePeriod(value: string): BasePeriod | null {
   return value === "ltm" || value === "annual" ? value : null;
+}
+
+function parseTerminalMethod(value: string): TerminalMethod {
+  return value === "exit-multiple" ? "exit-multiple" : "perpetuity";
+}
+
+function parseExitMetric(value: string): ExitMetric {
+  return value === "ebitda" || value === "revenue" ? value : "fcf";
+}
+
+function exitMetricLabel(metric: ExitMetric | null): string {
+  switch (metric) {
+    case "revenue":
+      return "revenue";
+    case "ebitda":
+      return "EBITDA";
+    default:
+      return "FCF";
+  }
 }
 
 function parseInputPercent(value: string): number | null {

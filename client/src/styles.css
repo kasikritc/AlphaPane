@@ -552,6 +552,13 @@ textarea {
   font-size: 12px;
 }
 
+.headline-note {
+  margin: 4px 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #244660;
+}
+
 .model-grid-wrap {
   overflow: auto;
   border: 1px solid #d8ddd3;
