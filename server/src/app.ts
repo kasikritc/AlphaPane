@@ -5,6 +5,7 @@ import {
   getColumnPreferences,
   getCompanyDetail,
   getCompanyRows,
+  getImpliedGrowthHistoryData,
   getRefreshRuns,
   getValuationDetail,
   getValuationRows,
@@ -34,6 +35,15 @@ export function createApp(db: DatabaseSync) {
       return;
     }
     res.json(detail);
+  });
+
+  app.get("/api/companies/:companyKey/implied-growth-history", (req, res) => {
+    const data = getImpliedGrowthHistoryData(db, req.params.companyKey);
+    if (!data) {
+      res.status(404).json({ error: "No implied growth history data available." });
+      return;
+    }
+    res.json(data);
   });
 
   app.get("/api/valuation/companies", (_req, res) => {
