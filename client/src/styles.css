@@ -66,9 +66,87 @@ button:disabled {
 
 .actions {
   display: flex;
-  gap: 10px;
+  gap: 8px;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.primary-refresh {
+  background: #2f4a2a;
+  border-color: #2f4a2a;
+  color: #ffffff;
+  min-width: 150px;
+}
+
+.primary-refresh:hover:not(:disabled) {
+  background: #294224;
+}
+
+.refresh-menu {
+  position: relative;
+}
+
+.refresh-menu summary {
+  list-style: none;
+  border: 1px solid #c8cec4;
+  border-radius: 6px;
+  background: #ffffff;
+  height: 38px;
+  width: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.refresh-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.refresh-menu > div {
+  position: absolute;
+  z-index: 5;
+  top: 44px;
+  right: 0;
+  width: 300px;
+  border: 1px solid #c8cec4;
+  background: #ffffff;
+  box-shadow: 0 12px 28px rgba(26, 32, 23, 0.14);
+  border-radius: 6px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.refresh-menu > div button {
+  width: 100%;
+  justify-content: flex-start;
+  text-align: left;
+  gap: 10px;
+  padding: 8px 10px;
+}
+
+.refresh-menu > div button span {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.refresh-menu > div button small {
+  color: #5b6258;
+  font-weight: 400;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spin {
+  animation: spin 0.9s linear infinite;
 }
 
 .layout {
@@ -116,6 +194,13 @@ button:disabled {
   align-items: center;
   gap: 7px;
   color: #40483d;
+}
+
+.freshness {
+  margin-left: auto;
+  color: #5b6258;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .columns-menu {

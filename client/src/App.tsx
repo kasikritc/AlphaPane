@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { ArrowDownUp, Columns3, DatabaseZap, RefreshCw, Search, Star } from "lucide-react";
+import { ArrowDownUp, ChevronDown, Columns3, DatabaseZap, RefreshCw, Search, Star } from "lucide-react";
 import type {
   ColumnPreference,
   CompanyDetail,
@@ -21,6 +21,12 @@ interface BaseRow {
   sector: string | null;
   isFavorite: boolean;
   note: string;
+}
+
+interface RefreshPayload {
+  rows: CompanyRow[];
+  valuationRows?: ValuationRow[];
+  runs: RefreshRun[];
 }
 
 interface TableColumn<Row extends BaseRow> {
@@ -88,6 +94,7 @@ export function App() {
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState<string | null>(null);
+  const [refreshStatus, setRefreshStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -147,14 +154,24 @@ export function App() {
     }
   }
 
-  async function runRefresh(kind: "prices" | "financials") {
+  function applyRefreshPayload(payload: RefreshPayload) {
+    setRows(payload.rows);
+    if (payload.valuationRows) setValuationRows(payload.valuationRows);
+    setRuns(payload.runs);
+  }
+
+  async function runRefresh(kind: "all" | "prices" | "financials") {
     setRefreshing(kind);
     setError(null);
     try {
-      const payload = await api<{ rows: CompanyRow[]; valuationRows?: ValuationRow[]; runs: RefreshRun[] }>(`/api/refresh/${kind}`, { method: "POST" });
-      setRows(payload.rows);
-      if (payload.valuationRows) setValuationRows(payload.valuationRows);
-      setRuns(payload.runs);
+      if (kind === "all") {
+        setRefreshStatus("Refreshing financials…");
+        applyRefreshPayload(await api<RefreshPayload>("/api/refresh/financials", { method: "POST" }));
+        setRefreshStatus("Refreshing market & valuation…");
+        applyRefreshPayload(await api<RefreshPayload>("/api/refresh/prices", { method: "POST" }));
+      } else {
+        applyRefreshPayload(await api<RefreshPayload>(`/api/refresh/${kind}`, { method: "POST" }));
+      }
       if (selectedKey) {
         if (activeTab === "reverseDcf") await loadDetail(selectedKey);
         else await loadValuationDetail(selectedKey);
@@ -165,8 +182,18 @@ export function App() {
       setRuns(refreshPayload.runs);
     } finally {
       setRefreshing(null);
+      setRefreshStatus(null);
     }
   }
+
+  const reverseFreshness = useMemo(() => {
+    const latest = latestDate(rows.flatMap((row) => [row.financialsUpdatedAt, row.pricesUpdatedAt]));
+    return latest ? `Data as of ${dateShort(latest)}` : "No data cached yet — click Refresh data";
+  }, [rows]);
+  const valuationFreshness = useMemo(() => {
+    const latest = latestDate(valuationRows.map((row) => row.valuationUpdatedAt));
+    return latest ? `Valuation data as of ${dateShort(latest)}` : "No valuation data cached yet — click Refresh data";
+  }, [valuationRows]);
 
   const reverseTable = useTable(rows, reverseColumns, preferences, query, favoritesOnly, sortKey, sortDirection);
   const valuationTable = useTable(valuationRows, valuationColumns, valuationPreferences, query, favoritesOnly, sortKey, sortDirection);
@@ -196,14 +223,23 @@ export function App() {
           <p>AlphaPane market scanner for reverse DCF and historical valuation mean reversion.</p>
         </div>
         <div className="actions">
-          <button onClick={() => void runRefresh("prices")} disabled={Boolean(refreshing)}>
-            <RefreshCw size={16} />
-            {refreshing === "prices" ? "Refreshing" : "Refresh Market"}
+          <button className="primary-refresh" onClick={() => void runRefresh("all")} disabled={Boolean(refreshing)}>
+            <RefreshCw size={16} className={refreshing ? "spin" : undefined} />
+            {refreshing ? refreshStatus ?? "Refreshing…" : "Refresh data"}
           </button>
-          <button onClick={() => void runRefresh("financials")} disabled={Boolean(refreshing)}>
-            <DatabaseZap size={16} />
-            {refreshing === "financials" ? "Refreshing" : "Refresh Financials"}
-          </button>
+          <details className="refresh-menu">
+            <summary aria-label="Advanced refresh options"><ChevronDown size={16} /></summary>
+            <div>
+              <button onClick={() => void runRefresh("prices")} disabled={Boolean(refreshing)}>
+                <RefreshCw size={15} />
+                <span><strong>Market &amp; valuation only</strong><small>Price, EV, current multiples, P/E z-scores &amp; σ-bands</small></span>
+              </button>
+              <button onClick={() => void runRefresh("financials")} disabled={Boolean(refreshing)}>
+                <DatabaseZap size={15} />
+                <span><strong>Financials &amp; DCF only</strong><small>Profile, revenue/FCF history, DCF default assumptions</small></span>
+              </button>
+            </div>
+          </details>
         </div>
       </header>
 
@@ -225,6 +261,9 @@ export function App() {
               <input type="checkbox" checked={favoritesOnly} onChange={(event) => setFavoritesOnly(event.target.checked)} />
               Favorites
             </label>
+            <span className="freshness" title="Click Refresh data to fetch the latest figures from Fiscal.ai">
+              {activeTab === "reverseDcf" ? reverseFreshness : valuationFreshness}
+            </span>
             <details className="columns-menu">
               <summary><Columns3 size={16} /> Columns</summary>
               <div>
@@ -453,7 +492,7 @@ function PeBandChart({ history }: { history: ValuationHistoryPoint[] }) {
     ...["-2σ", "-1σ", "Mean", "+1σ", "+2σ"].map((label, index) => ({ label, color: ["#16a34a", "#84cc16", "#2563eb", "#f97316", "#dc2626"][index], values: history.map((point) => point.bandPrices[label] ?? null) }))
   ];
   const allValues = series.flatMap((item) => item.values).filter((value): value is number => Number.isFinite(value));
-  if (history.length < 2 || allValues.length === 0) return <p>No P/E band history cached yet. Run Refresh Market after configuring data access.</p>;
+  if (history.length < 2 || allValues.length === 0) return <p>No P/E band history cached yet. Click Refresh data to fetch it from Fiscal.ai.</p>;
   const min = Math.min(...allValues);
   const max = Math.max(...allValues);
   const span = max - min || 1;
@@ -566,6 +605,10 @@ function zScore(value: number | null): string {
 function dateShort(value: string | null): string {
   if (!value) return "-";
   return new Date(value).toLocaleDateString();
+}
+
+function latestDate(values: Array<string | null>): string | null {
+  return values.filter((value): value is string => Boolean(value)).sort().at(-1) ?? null;
 }
 
 function strong(value: string) {
