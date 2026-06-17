@@ -1,0 +1,24 @@
+{
+  "name": "alphapane",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "client",
+    "server",
+    "shared"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace @alphapane/shared && npm run build --workspace @alphapane/server && npm run build --workspace @alphapane/client",
+    "dev": "concurrently -n server,client -c blue,green \"npm run dev --workspace @alphapane/server\" \"npm run dev --workspace @alphapane/client\"",
+    "test": "npm run test --workspace @alphapane/server",
+    "typecheck": "npm run build --workspace @alphapane/shared && npm run typecheck --workspace @alphapane/server && npm run typecheck --workspace @alphapane/client",
+    "refresh:financials": "npm run build --workspace @alphapane/shared && npm run refresh:financials --workspace @alphapane/server",
+    "refresh:prices": "npm run build --workspace @alphapane/shared && npm run refresh:prices --workspace @alphapane/server",
+    "backfill:fallbacks": "npm run build --workspace @alphapane/shared && npm run backfill:fallbacks --workspace @alphapane/server"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.3",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "name": "@alphapane/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "refresh:financials": "tsx src/cli.ts refresh:financials",
+    "refresh:prices": "tsx src/cli.ts refresh:prices",
+    "backfill:fallbacks": "tsx src/cli.ts backfill:fallbacks"
+  },
+  "dependencies": {
+    "@alphapane/shared": "file:../shared",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.5",
+    "@types/node": "^22.18.14",
+    "tsx": "^4.20.6",
+    "vitest": "^4.1.9"
+  }
+}
