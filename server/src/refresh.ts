@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { BasePeriod, FinancialBase } from "@alphapane/shared";
+import type { BasePeriod, EvBridge, FinancialBase } from "@alphapane/shared";
 import { TRIAL_COMPANIES } from "@alphapane/shared";
 import { FiscalClient } from "./fiscalClient.js";
 import { cagr, defaultDiscountRate, median, normalizeTerminalGrowth } from "./math.js";
@@ -42,16 +42,17 @@ export async function refreshFinancials(db: DatabaseSync, client = new FiscalCli
   const runId = createRefreshRun(db, "financials");
   try {
     for (const companyKey of TRIAL_COMPANIES) {
-      const [profile, ratios, income, cashFlow] = await Promise.all([
+      const [profile, ratios, income, cashFlow, balanceSheet] = await Promise.all([
         client.companyProfile(companyKey),
         client.companyRatios(companyKey, "latest,annual"),
         client.standardizedFinancials(companyKey, "income-statement", "ltm,annual"),
-        client.standardizedFinancials(companyKey, "cash-flow-statement", "ltm,annual")
+        client.standardizedFinancials(companyKey, "cash-flow-statement", "ltm,annual"),
+        client.standardizedFinancials(companyKey, "balance-sheet", "quarterly,annual")
       ]);
 
       upsertCompanyProfile(db, { ...profile, companyKey });
       upsertMarketSnapshot(db, companyKey, selectLatestRatioRow(ratios));
-      upsertFinancialSnapshot(db, companyKey, deriveFinancialSnapshot(profile, ratios, income, cashFlow));
+      upsertFinancialSnapshot(db, companyKey, deriveFinancialSnapshot(profile, ratios, income, cashFlow, balanceSheet));
     }
     recomputeModels(db);
     finishRefreshRun(db, runId, "success", `Updated financial cache for ${TRIAL_COMPANIES.length} companies.`);
@@ -75,13 +76,15 @@ function deriveFinancialSnapshot(
   profile: Record<string, unknown>,
   ratios: Record<string, unknown>,
   income: Record<string, unknown>,
-  cashFlow: Record<string, unknown>
+  cashFlow: Record<string, unknown>,
+  balanceSheet: Record<string, unknown>
 ) {
   const latestRatioRow = selectLatestRatioRow(ratios);
   const latestRatioValues = latestRatioRow?.metricValues ?? {};
   const incomeRows = standardizedRows(income);
   const cashFlowRows = standardizedRows(cashFlow);
   const baseFinancials = buildFinancialBases(incomeRows, cashFlowRows);
+  const evBridge = buildEvBridge(standardizedRows(balanceSheet), latestRatioValues);
   const revenueHistory = incomeRows
     .filter((row) => row.periodType === "Annual")
     .map((row) => ({
@@ -138,6 +141,7 @@ function deriveFinancialSnapshot(
     historicalRevenueCagr5y,
     basePeriodDefault: selectedBase?.period ?? null,
     baseFinancials,
+    evBridge,
     normalizedFcfMarginDefault: marginDefault.value,
     terminalGrowthDefault,
     discountRateDefault,
@@ -209,6 +213,59 @@ function freeCashFlowFromRow(row: StandardizedRow): number | null {
     "cash_flow_statement_net_capital_expenditure"
   ]);
   return operatingCashFlow !== null && capex !== null ? operatingCashFlow + capex : null;
+}
+
+
+export function buildEvBridge(balanceRows: StandardizedRow[], marketValues: Record<string, any>): EvBridge | null {
+  const balanceRow = latestBalanceRow(balanceRows);
+  const marketCap = numberOrNull(marketValues.calculated_market_cap);
+  const fiscalEnterpriseValue = numberOrNull(marketValues.calculated_tev ?? marketValues.calculated_market_cap);
+  if (!balanceRow && marketCap === null && fiscalEnterpriseValue === null) return null;
+  const cash = balanceRow ? pickValue(balanceRow.metricsValues, [
+    "balance_sheet_total_cash_and_cash_equivalents",
+    "balance_sheet_cash_and_cash_equivalents"
+  ]) : null;
+  const shortTermDebt = balanceRow ? pickValue(balanceRow.metricsValues, ["balance_sheet_short_term_debt"]) : null;
+  const longTermDebt = balanceRow ? pickValue(balanceRow.metricsValues, ["balance_sheet_long_term_debt"]) : null;
+  const totalDebt = balanceRow ? pickValue(balanceRow.metricsValues, ["balance_sheet_total_debt"]) : null;
+  const debt = totalDebt ?? sumNullable(shortTermDebt, longTermDebt);
+  const leases = null;
+  const preferredStock = balanceRow ? pickValue(balanceRow.metricsValues, ["balance_sheet_preferred_stock"]) : null;
+  const minorityInterest = balanceRow ? pickValue(balanceRow.metricsValues, ["balance_sheet_minority_interests_and_other"]) : null;
+  const netDebt = debt !== null || leases !== null || cash !== null ? (debt ?? 0) + (leases ?? 0) - (cash ?? 0) : null;
+  const rebuiltEnterpriseValue = marketCap !== null
+    ? marketCap + (debt ?? 0) + (leases ?? 0) + (preferredStock ?? 0) + (minorityInterest ?? 0) - (cash ?? 0)
+    : null;
+  const difference = rebuiltEnterpriseValue !== null && fiscalEnterpriseValue !== null ? rebuiltEnterpriseValue - fiscalEnterpriseValue : null;
+  const differencePercent = difference !== null && fiscalEnterpriseValue && fiscalEnterpriseValue > 0 ? difference / fiscalEnterpriseValue : null;
+  return {
+    marketCap,
+    cash,
+    debt,
+    leases,
+    preferredStock,
+    minorityInterest,
+    netDebt,
+    fiscalEnterpriseValue,
+    rebuiltEnterpriseValue,
+    difference,
+    differencePercent,
+    warning: Math.abs(differencePercent ?? 0) > 0.05 ? "Rebuilt EV differs materially from Fiscal calculated TEV." : null,
+    asOfDate: nullableString(balanceRow?.reportDate),
+    source: balanceRow ? "Fiscal standardized balance sheet" : null
+  };
+}
+
+function latestBalanceRow(rows: StandardizedRow[]): StandardizedRow | null {
+  return rows
+    .filter((row) => row.periodType === "Quarterly" || row.periodType === "Annual")
+    .sort((a, b) => a.reportDate.localeCompare(b.reportDate))
+    .at(-1) ?? null;
+}
+
+function sumNullable(...values: Array<number | null>): number | null {
+  const clean = values.filter((value): value is number => Number.isFinite(value));
+  return clean.length > 0 ? clean.reduce((sum, value) => sum + value, 0) : null;
 }
 
 function chooseNormalizedFcfMargin(

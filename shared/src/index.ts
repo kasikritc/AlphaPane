@@ -155,6 +155,24 @@ export interface AssumptionSet {
   terminalGrowth: number | null;
 }
 
+
+export interface EvBridge {
+  marketCap: number | null;
+  cash: number | null;
+  debt: number | null;
+  leases: number | null;
+  preferredStock: number | null;
+  minorityInterest: number | null;
+  netDebt: number | null;
+  fiscalEnterpriseValue: number | null;
+  rebuiltEnterpriseValue: number | null;
+  difference: number | null;
+  differencePercent: number | null;
+  warning: string | null;
+  asOfDate: string | null;
+  source: string | null;
+}
+
 export interface AssumptionSources {
   latestRevenue: string | null;
   normalizedFcfMargin: string | null;
@@ -178,6 +196,7 @@ export interface CompanyDetail {
     ltm: FinancialBase | null;
     annual: FinancialBase | null;
   };
+  evBridge: EvBridge | null;
   gridColumns: string[];
   gridRows: ModelCell[];
   revenueHistory: Array<{ year: number; value: number; reportDate: string }>;

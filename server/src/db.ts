@@ -101,6 +101,7 @@ function migrate(db: DatabaseSync): void {
       historical_revenue_cagr_5y REAL,
       base_period_default TEXT,
       base_financials_json TEXT NOT NULL DEFAULT '{}',
+      ev_bridge_json TEXT NOT NULL DEFAULT '{}',
       normalized_fcf_margin_default REAL,
       normalized_fcf_margin_source TEXT,
       latest_revenue_source TEXT,
@@ -167,6 +168,7 @@ function migrate(db: DatabaseSync): void {
   addColumnIfMissing(db, 'market_snapshots', 'fcf_yield', 'REAL');
   addColumnIfMissing(db, 'financial_snapshots', 'base_period_default', 'TEXT');
   addColumnIfMissing(db, 'financial_snapshots', 'base_financials_json', "TEXT NOT NULL DEFAULT '{}'");
+  addColumnIfMissing(db, 'financial_snapshots', 'ev_bridge_json', "TEXT NOT NULL DEFAULT '{}'");
   addColumnIfMissing(db, 'financial_snapshots', 'normalized_fcf_margin_source', 'TEXT');
   addColumnIfMissing(db, 'financial_snapshots', 'latest_revenue_source', 'TEXT');
   addColumnIfMissing(db, 'financial_snapshots', 'historical_revenue_cagr_5y_source', 'TEXT');

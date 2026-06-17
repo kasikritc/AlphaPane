@@ -532,6 +532,16 @@ textarea {
   color: #5b6258;
 }
 
+.inline-warning {
+  border: 1px solid #e0ba9a;
+  background: #fff5eb;
+  color: #703711;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+
 .model-grid-wrap {
   overflow: auto;
   border: 1px solid #d8ddd3;

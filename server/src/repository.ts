@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { AssumptionSet, AssumptionSources, BasePeriod, ColumnPreference, CompanyDetail, CompanyRow, FinancialBase, ModelCell, RefreshRun, ValuationDetail, ValuationHistoryPoint, ValuationMetricKey, ValuationMetricStats, ValuationRow } from "@alphapane/shared";
+import type { AssumptionSet, AssumptionSources, BasePeriod, ColumnPreference, CompanyDetail, CompanyRow, EvBridge, FinancialBase, ModelCell, RefreshRun, ValuationDetail, ValuationHistoryPoint, ValuationMetricKey, ValuationMetricStats, ValuationRow } from "@alphapane/shared";
 import { TRIAL_COMPANIES } from "@alphapane/shared";
 import { buildModel, median } from "./math.js";
 import { VALUATION_RATIOS } from "./valuation.js";
@@ -18,12 +18,14 @@ interface JoinedCompany {
   terminal_url: string | null;
   caution: string | null;
   share_price: number | null;
+  market_cap: number | null;
   enterprise_value: number | null;
   ev_to_revenue: number | null;
   latest_revenue: number | null;
   historical_revenue_cagr_5y: number | null;
   base_period_default: string | null;
   base_financials_json: string | null;
+  ev_bridge_json: string | null;
   normalized_fcf_margin_default: number | null;
   normalized_fcf_margin_source: string | null;
   latest_revenue_source: string | null;
@@ -53,8 +55,8 @@ export function getCompanyDetail(db: DatabaseSync, companyKey: string): CompanyD
   const joined = db.prepare(`${rowSql()} WHERE c.company_key = ?`).get(companyKey) as unknown as JoinedCompany | undefined;
   if (!joined) return null;
   const financial = db
-    .prepare("SELECT base_financials_json, revenue_history_json, fcf_history_json, source_links_json FROM financial_snapshots WHERE company_key = ?")
-    .get(companyKey) as { base_financials_json?: string; revenue_history_json?: string; fcf_history_json?: string; source_links_json?: string } | undefined;
+    .prepare("SELECT base_financials_json, ev_bridge_json, revenue_history_json, fcf_history_json, source_links_json FROM financial_snapshots WHERE company_key = ?")
+    .get(companyKey) as { base_financials_json?: string; ev_bridge_json?: string; revenue_history_json?: string; fcf_history_json?: string; source_links_json?: string } | undefined;
   const model = db
     .prepare("SELECT model_grid_json FROM model_outputs WHERE company_key = ?")
     .get(companyKey) as { model_grid_json?: string } | undefined;
@@ -64,6 +66,7 @@ export function getCompanyDetail(db: DatabaseSync, companyKey: string): CompanyD
   const gridRows = markOverrides(parseJson<ModelCell[]>(model?.model_grid_json, []), overrides);
   const bases = parseBaseFinancials(financial?.base_financials_json ?? joined.base_financials_json);
   const selected = selectBasePeriod(overrides.basePeriod ?? defaults.basePeriod, bases);
+  const evBridge = buildCurrentEvBridge(parseJson<Partial<EvBridge>>(financial?.ev_bridge_json ?? joined.ev_bridge_json ?? undefined, {}), numberOrNull(joined.market_cap), numberOrNull(joined.enterprise_value));
 
   return {
     row: toCompanyRow(joined),
@@ -71,6 +74,7 @@ export function getCompanyDetail(db: DatabaseSync, companyKey: string): CompanyD
     overrides,
     sources: getAssumptionSources(joined),
     baseFinancials: { selected, ...bases },
+    evBridge,
     gridColumns: GRID_COLUMNS,
     gridRows,
     revenueHistory: parseJson(financial?.revenue_history_json, []),
@@ -345,6 +349,7 @@ export function upsertFinancialSnapshot(
     historicalRevenueCagr5y: number | null;
     basePeriodDefault: BasePeriod | null;
     baseFinancials: { ltm: FinancialBase | null; annual: FinancialBase | null };
+    evBridge: EvBridge | null;
     normalizedFcfMarginDefault: number | null;
     terminalGrowthDefault: number | null;
     discountRateDefault: number | null;
@@ -359,12 +364,12 @@ export function upsertFinancialSnapshot(
   db.prepare(`
     INSERT INTO financial_snapshots (
       company_key, latest_revenue, latest_revenue_year, latest_revenue_report_date,
-      historical_revenue_cagr_5y, base_period_default, base_financials_json, normalized_fcf_margin_default, normalized_fcf_margin_source,
+      historical_revenue_cagr_5y, base_period_default, base_financials_json, ev_bridge_json, normalized_fcf_margin_default, normalized_fcf_margin_source,
       latest_revenue_source, historical_revenue_cagr_5y_source,
       terminal_growth_default, discount_rate_default, revenue_history_json,
       fcf_history_json, source_links_json, updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(company_key) DO UPDATE SET
       latest_revenue = excluded.latest_revenue,
       latest_revenue_year = excluded.latest_revenue_year,
@@ -372,6 +377,7 @@ export function upsertFinancialSnapshot(
       historical_revenue_cagr_5y = excluded.historical_revenue_cagr_5y,
       base_period_default = excluded.base_period_default,
       base_financials_json = excluded.base_financials_json,
+      ev_bridge_json = excluded.ev_bridge_json,
       normalized_fcf_margin_default = excluded.normalized_fcf_margin_default,
       normalized_fcf_margin_source = excluded.normalized_fcf_margin_source,
       latest_revenue_source = excluded.latest_revenue_source,
@@ -390,6 +396,7 @@ export function upsertFinancialSnapshot(
     input.historicalRevenueCagr5y,
     input.basePeriodDefault,
     JSON.stringify(input.baseFinancials),
+    JSON.stringify(input.evBridge ?? {}),
     input.normalizedFcfMarginDefault,
     input.normalizedFcfMarginSource,
     input.latestRevenueSource,
@@ -468,8 +475,8 @@ function rowSql(): string {
     SELECT
       c.company_key, c.ticker, c.exchange, c.name, c.sector, c.industry,
       c.reporting_template, c.terminal_url, c.caution,
-      m.share_price, m.enterprise_value, m.ev_to_revenue, m.updated_at AS prices_updated_at,
-      f.latest_revenue, f.historical_revenue_cagr_5y, f.base_period_default, f.base_financials_json,
+      m.share_price, m.market_cap, m.enterprise_value, m.ev_to_revenue, m.updated_at AS prices_updated_at,
+      f.latest_revenue, f.historical_revenue_cagr_5y, f.base_period_default, f.base_financials_json, f.ev_bridge_json,
       f.normalized_fcf_margin_default, f.normalized_fcf_margin_source, f.latest_revenue_source, f.historical_revenue_cagr_5y_source,
       f.discount_rate_default, f.terminal_growth_default,
       f.updated_at AS financials_updated_at,
@@ -554,6 +561,43 @@ function getAssumptionOverrides(row: JoinedCompany): AssumptionSet {
   };
 }
 
+
+
+function buildCurrentEvBridge(cached: Partial<EvBridge>, marketCap: number | null, fiscalEnterpriseValue: number | null): EvBridge | null {
+  if (!cached || Object.keys(cached).length === 0) return marketCap !== null || fiscalEnterpriseValue !== null ? {
+    marketCap, cash: null, debt: null, leases: null, preferredStock: null, minorityInterest: null, netDebt: null,
+    fiscalEnterpriseValue, rebuiltEnterpriseValue: null, difference: null, differencePercent: null, warning: null, asOfDate: null, source: null
+  } : null;
+  const cash = numberOrNull(cached.cash);
+  const debt = numberOrNull(cached.debt);
+  const leases = numberOrNull(cached.leases);
+  const preferredStock = numberOrNull(cached.preferredStock);
+  const minorityInterest = numberOrNull(cached.minorityInterest);
+  const effectiveMarketCap = marketCap ?? numberOrNull(cached.marketCap);
+  const effectiveFiscalEv = fiscalEnterpriseValue ?? numberOrNull(cached.fiscalEnterpriseValue);
+  const netDebt = debt !== null || leases !== null || cash !== null ? (debt ?? 0) + (leases ?? 0) - (cash ?? 0) : null;
+  const rebuiltEnterpriseValue = effectiveMarketCap !== null
+    ? effectiveMarketCap + (debt ?? 0) + (leases ?? 0) + (preferredStock ?? 0) + (minorityInterest ?? 0) - (cash ?? 0)
+    : null;
+  const difference = rebuiltEnterpriseValue !== null && effectiveFiscalEv !== null ? rebuiltEnterpriseValue - effectiveFiscalEv : null;
+  const differencePercent = difference !== null && effectiveFiscalEv && effectiveFiscalEv > 0 ? difference / effectiveFiscalEv : null;
+  return {
+    marketCap: effectiveMarketCap,
+    cash,
+    debt,
+    leases,
+    preferredStock,
+    minorityInterest,
+    netDebt,
+    fiscalEnterpriseValue: effectiveFiscalEv,
+    rebuiltEnterpriseValue,
+    difference,
+    differencePercent,
+    warning: Math.abs(differencePercent ?? 0) > 0.05 ? "Rebuilt EV differs materially from Fiscal calculated TEV." : null,
+    asOfDate: nullableString(cached.asOfDate),
+    source: nullableString(cached.source)
+  };
+}
 
 function parseBaseFinancials(value: string | null | undefined): { ltm: FinancialBase | null; annual: FinancialBase | null } {
   const parsed = parseJson<Partial<Record<BasePeriod, FinancialBase>>>(value ?? undefined, {});

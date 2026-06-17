@@ -440,6 +440,7 @@ function ReverseDcfDetailView({ detail, onSaved }: { detail: CompanyDetail; onSa
         </div>
         <BaseFinancialsTable detail={detail} selected={assumptions.basePeriod} />
       </section>
+      <EvBridgeSection detail={detail} />
       <section className="section">
         <h3>Assumptions</h3>
         <div className="assumption-grid">
@@ -457,6 +458,35 @@ function ReverseDcfDetailView({ detail, onSaved }: { detail: CompanyDetail; onSa
   );
 }
 
+
+
+function EvBridgeSection({ detail }: { detail: CompanyDetail }) {
+  const bridge = detail.evBridge;
+  return (
+    <section className="section">
+      <h3>EV Bridge</h3>
+      {bridge?.warning && <div className="inline-warning">{bridge.warning}</div>}
+      <div className="metric-table-wrap base-financials">
+        <table className="model-grid">
+          <tbody>
+            <tr><th>Item</th><th>Value</th></tr>
+            <tr><td>Market cap</td><td>{compactMoney(bridge?.marketCap ?? null)}</td></tr>
+            <tr><td>Cash</td><td>{compactMoney(bridge?.cash ?? null)}</td></tr>
+            <tr><td>Debt</td><td>{compactMoney(bridge?.debt ?? null)}</td></tr>
+            <tr><td>Leases</td><td>{compactMoney(bridge?.leases ?? null)}</td></tr>
+            <tr><td>Preferred stock</td><td>{compactMoney(bridge?.preferredStock ?? null)}</td></tr>
+            <tr><td>Minority interest</td><td>{compactMoney(bridge?.minorityInterest ?? null)}</td></tr>
+            <tr><td>Net debt</td><td>{compactMoney(bridge?.netDebt ?? null)}</td></tr>
+            <tr><td>Fiscal calculated TEV</td><td>{compactMoney(bridge?.fiscalEnterpriseValue ?? detail.row.enterpriseValue)}</td></tr>
+            <tr><td>Rebuilt EV</td><td>{compactMoney(bridge?.rebuiltEnterpriseValue ?? null)}</td></tr>
+            <tr><td>Difference</td><td>{bridge?.differencePercent !== null && bridge?.differencePercent !== undefined ? `${compactMoney(bridge.difference)} (${percent(bridge.differencePercent)})` : compactMoney(bridge?.difference ?? null)}</td></tr>
+            <tr><td>Balance sheet date</td><td>{dateShort(bridge?.asOfDate ?? null)}</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
 
 function BaseFinancialsTable({ detail, selected }: { detail: CompanyDetail; selected: BasePeriod | null }) {
   const base = selected === "annual" ? detail.baseFinancials.annual : detail.baseFinancials.ltm ?? detail.baseFinancials.annual;
