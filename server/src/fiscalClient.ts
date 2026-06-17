@@ -28,9 +28,11 @@ export class FiscalClient {
         "ratio_price_to_sales",
         "ratio_price_to_earnings",
         "ratio_ev_to_ebitda",
+        "ratio_ev_to_fcf",
         "ratio_fcf_yield",
         "calculated_fcf",
         "ratio_fcf_margin",
+        "ratio_ebitda_margin",
         "growth_revenue_1y",
         "growth_revenue_3y_cagr",
         "growth_revenue_5y_cagr"

@@ -148,11 +148,28 @@ export interface FinancialBase {
   source: string | null;
 }
 
+export type TerminalMethod = 'perpetuity' | 'exit-multiple';
+export type ExitMetric = 'fcf' | 'ebitda' | 'revenue';
+
 export interface AssumptionSet {
   basePeriod: BasePeriod | null;
   normalizedFcfMargin: number | null;
   discountRate: number | null;
   terminalGrowth: number | null;
+  terminalMethod: TerminalMethod | null;
+  exitMetric: ExitMetric | null;
+  exitMultiple: number | null;
+  normalizedEbitdaMargin: number | null;
+}
+
+export interface ExitMultipleStat {
+  metric: ExitMetric;
+  label: string;
+  current: number | null;
+  low: number | null;
+  median: number | null;
+  high: number | null;
+  source: string | null;
 }
 
 
@@ -177,6 +194,8 @@ export interface AssumptionSources {
   latestRevenue: string | null;
   normalizedFcfMargin: string | null;
   historicalRevenueCagr5y: string | null;
+  normalizedEbitdaMargin: string | null;
+  exitMultiple: string | null;
 }
 
 
@@ -205,6 +224,19 @@ export interface ModelCell {
   format: "currency" | "percent" | "multiple" | "number" | "text";
 }
 
+export type SensitivityFormat = "percent" | "multiple";
+
+export interface SensitivityTable {
+  title: string;
+  rowLabel: string;
+  colLabel: string;
+  rowFormat: SensitivityFormat;
+  colFormat: SensitivityFormat;
+  rowValues: number[];
+  colValues: number[];
+  cells: Array<Array<number | null>>;
+}
+
 export interface CompanyDetail {
   row: CompanyRow;
   defaults: AssumptionSet;
@@ -217,6 +249,8 @@ export interface CompanyDetail {
   };
   evBridge: EvBridge | null;
   diagnostics: ModelDiagnostics | null;
+  exitMultipleStats: ExitMultipleStat[];
+  sensitivity: SensitivityTable[];
   gridColumns: string[];
   gridRows: ModelCell[];
   revenueHistory: Array<{ year: number; value: number; reportDate: string }>;

@@ -62,7 +62,11 @@ export function createApp(db: DatabaseSync) {
       basePeriod: cleanBasePeriod(req.body.basePeriod),
       normalizedFcfMargin: cleanPercent(req.body.normalizedFcfMargin),
       discountRate: cleanPercent(req.body.discountRate),
-      terminalGrowth: cleanPercent(req.body.terminalGrowth)
+      terminalGrowth: cleanPercent(req.body.terminalGrowth),
+      terminalMethod: cleanTerminalMethod(req.body.terminalMethod),
+      exitMetric: cleanExitMetric(req.body.exitMetric),
+      exitMultiple: cleanPercent(req.body.exitMultiple),
+      normalizedEbitdaMargin: cleanPercent(req.body.normalizedEbitdaMargin)
     });
     res.json(getCompanyDetail(db, req.params.companyKey));
   });
@@ -110,6 +114,14 @@ function cleanPercent(value: unknown): number | null | undefined {
   if (value === undefined || value === "") return undefined;
   const number = Number(value);
   return Number.isFinite(number) ? number : undefined;
+}
+
+function cleanTerminalMethod(value: unknown): "perpetuity" | "exit-multiple" | undefined {
+  return value === "perpetuity" || value === "exit-multiple" ? value : undefined;
+}
+
+function cleanExitMetric(value: unknown): "fcf" | "ebitda" | "revenue" | undefined {
+  return value === "fcf" || value === "ebitda" || value === "revenue" ? value : undefined;
 }
 
 function errorMessage(error: unknown): string {

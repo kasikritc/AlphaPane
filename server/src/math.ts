@@ -1,4 +1,4 @@
-import type { ModelCell, ModelDiagnostics, Signal, SolveStatus } from "@alphapane/shared";
+import type { ExitMetric, ModelCell, ModelDiagnostics, SensitivityTable, Signal, SolveStatus, TerminalMethod } from "@alphapane/shared";
 
 export interface HistoryPoint {
   year: number;
@@ -17,6 +17,18 @@ export interface DcfInputs {
   discountRate: number | null;
   terminalGrowth: number | null;
   historicalRevenueCagr5y: number | null;
+  terminalMethod?: TerminalMethod | null;
+  exitMetric?: ExitMetric | null;
+  exitMultiple?: number | null;
+  normalizedEbitdaMargin?: number | null;
+}
+
+interface TerminalParams {
+  terminalMethod: TerminalMethod;
+  terminalGrowth: number;
+  exitMetric: ExitMetric;
+  exitMultiple: number;
+  normalizedEbitdaMargin: number | null;
 }
 
 export interface ModelOutput {
@@ -79,7 +91,9 @@ export function deriveSignal(implied: number | null, historical: number | null):
 }
 
 export function buildModel(inputs: DcfInputs): ModelOutput {
-  const missing = requiredMissing(inputs);
+  const terminalMethod: TerminalMethod = inputs.terminalMethod ?? "perpetuity";
+  const exitMetric: ExitMetric = inputs.exitMetric ?? "fcf";
+  const missing = requiredMissing(inputs, terminalMethod, exitMetric);
   if (missing.length > 0) {
     const statusMessage = `Missing ${missing.join(", ")}.`;
     return {
@@ -97,23 +111,35 @@ export function buildModel(inputs: DcfInputs): ModelOutput {
   const baseRevenue = inputs.baseRevenue as number;
   const normalizedFcfMargin = inputs.normalizedFcfMargin as number;
   const discountRate = inputs.discountRate as number;
-  const terminalGrowth = inputs.terminalGrowth as number;
+  const terminalGrowth = (inputs.terminalGrowth ?? 0) as number;
+  const exitMultiple = (inputs.exitMultiple ?? 0) as number;
+  const normalizedEbitdaMargin = inputs.normalizedEbitdaMargin ?? null;
 
   if (normalizedFcfMargin <= 0) {
     return invalid("Normalized FCF margin must be positive for this reverse DCF.");
   }
-  if (discountRate <= terminalGrowth) {
-    return invalid("Discount rate must be greater than terminal growth.");
+  if (terminalMethod === "perpetuity") {
+    if (discountRate <= terminalGrowth) {
+      return invalid("Discount rate must be greater than terminal growth.");
+    }
+  } else {
+    if (exitMultiple <= 0) {
+      return invalid("Exit multiple must be positive for an exit-multiple terminal value.");
+    }
+    if (exitMetric === "ebitda" && !(normalizedEbitdaMargin !== null && normalizedEbitdaMargin > 0)) {
+      return invalid("Normalized EBITDA margin must be positive for an EBITDA exit multiple.");
+    }
   }
 
+  const terminal: TerminalParams = { terminalMethod, terminalGrowth, exitMetric, exitMultiple, normalizedEbitdaMargin };
   const solve = solveGrowthWithDiagnostics(
-    (growth) => evaluateDcf({ baseRevenue, growth, normalizedFcfMargin, discountRate, terminalGrowth }).intrinsicEv,
+    (growth) => evaluateDcf({ baseRevenue, growth, normalizedFcfMargin, discountRate, terminal }).intrinsicEv,
     enterpriseValue
   );
   const impliedRevenueCagr = solve.impliedGrowth;
   const solvedEvaluation = impliedRevenueCagr === null
     ? null
-    : evaluateDcf({ baseRevenue, growth: impliedRevenueCagr, normalizedFcfMargin, discountRate, terminalGrowth });
+    : evaluateDcf({ baseRevenue, growth: impliedRevenueCagr, normalizedFcfMargin, discountRate, terminal });
 
   const cagrGap =
     Number.isFinite(impliedRevenueCagr) && Number.isFinite(inputs.historicalRevenueCagr5y)
@@ -125,7 +151,7 @@ export function buildModel(inputs: DcfInputs): ModelOutput {
     baseRevenue,
     normalizedFcfMargin,
     discountRate,
-    terminalGrowth,
+    terminal,
     impliedRevenueCagr
   });
   const diagnostics = makeDiagnostics({
@@ -146,17 +172,94 @@ export function buildModel(inputs: DcfInputs): ModelOutput {
   };
 }
 
-function requiredMissing(inputs: DcfInputs): string[] {
-  const checks: Array<[keyof DcfInputs, string]> = [
-    ["enterpriseValue", "enterprise value"],
-    ["baseRevenue", "base revenue"],
-    ["normalizedFcfMargin", "normalized FCF margin"],
-    ["discountRate", "discount rate"],
-    ["terminalGrowth", "terminal growth"]
+const MARGIN_FACTORS = [0.7, 0.85, 1.0, 1.15, 1.3];
+const MULTIPLE_FACTORS = [0.6, 0.8, 1.0, 1.2, 1.4];
+const RATE_DELTAS = [-0.02, -0.01, 0, 0.01, 0.02];
+
+export function buildSensitivity(inputs: DcfInputs): SensitivityTable[] {
+  const baseMargin = inputs.normalizedFcfMargin;
+  const baseDiscount = inputs.discountRate;
+  if (!isFinitePositive(baseMargin) || !isFinitePositive(baseDiscount)) return [];
+  const terminalMethod: TerminalMethod = inputs.terminalMethod ?? "perpetuity";
+
+  const solveCell = (override: Partial<DcfInputs>): number | null =>
+    buildModel({ ...inputs, ...override }).impliedRevenueCagr;
+
+  const marginAxis = MARGIN_FACTORS.map((factor) => (baseMargin as number) * factor);
+  const discountAxis = RATE_DELTAS.map((delta) => (baseDiscount as number) + delta).filter((value) => value > 0);
+
+  const tables: SensitivityTable[] = [];
+
+  tables.push({
+    title: "Implied revenue CAGR — FCF margin × discount rate",
+    rowLabel: "FCF margin",
+    colLabel: "Discount rate",
+    rowFormat: "percent",
+    colFormat: "percent",
+    rowValues: marginAxis,
+    colValues: discountAxis,
+    cells: marginAxis.map((margin) =>
+      discountAxis.map((discount) => solveCell({ normalizedFcfMargin: margin, discountRate: discount }))
+    )
+  });
+
+  if (terminalMethod === "exit-multiple") {
+    const baseMultiple = inputs.exitMultiple;
+    if (isFinitePositive(baseMultiple)) {
+      const multipleAxis = MULTIPLE_FACTORS.map((factor) => (baseMultiple as number) * factor);
+      tables.push({
+        title: "Implied revenue CAGR — FCF margin × exit multiple",
+        rowLabel: "FCF margin",
+        colLabel: "Exit multiple",
+        rowFormat: "percent",
+        colFormat: "multiple",
+        rowValues: marginAxis,
+        colValues: multipleAxis,
+        cells: marginAxis.map((margin) =>
+          multipleAxis.map((multiple) => solveCell({ normalizedFcfMargin: margin, exitMultiple: multiple }))
+        )
+      });
+    }
+  } else if (Number.isFinite(inputs.terminalGrowth)) {
+    const baseGrowth = inputs.terminalGrowth as number;
+    const growthAxis = RATE_DELTAS.map((delta) => baseGrowth + delta).filter((value) => value < (baseDiscount as number));
+    tables.push({
+      title: "Implied revenue CAGR — FCF margin × terminal growth",
+      rowLabel: "FCF margin",
+      colLabel: "Terminal growth",
+      rowFormat: "percent",
+      colFormat: "percent",
+      rowValues: marginAxis,
+      colValues: growthAxis,
+      cells: marginAxis.map((margin) =>
+        growthAxis.map((growth) => solveCell({ normalizedFcfMargin: margin, terminalGrowth: growth }))
+      )
+    });
+  }
+
+  return tables;
+}
+
+function isFinitePositive(value: number | null | undefined): value is number {
+  return Number.isFinite(value) && (value as number) > 0;
+}
+
+function requiredMissing(inputs: DcfInputs, terminalMethod: TerminalMethod, exitMetric: ExitMetric): string[] {
+  const checks: Array<[boolean, string]> = [
+    [!Number.isFinite(inputs.enterpriseValue), "enterprise value"],
+    [!Number.isFinite(inputs.baseRevenue), "base revenue"],
+    [!Number.isFinite(inputs.normalizedFcfMargin), "normalized FCF margin"],
+    [!Number.isFinite(inputs.discountRate), "discount rate"]
   ];
-  return checks
-    .filter(([key]) => !Number.isFinite(inputs[key]))
-    .map(([, label]) => label);
+  if (terminalMethod === "perpetuity") {
+    checks.push([!Number.isFinite(inputs.terminalGrowth), "terminal growth"]);
+  } else {
+    checks.push([!Number.isFinite(inputs.exitMultiple), "exit multiple"]);
+    if (exitMetric === "ebitda") {
+      checks.push([!Number.isFinite(inputs.normalizedEbitdaMargin), "normalized EBITDA margin"]);
+    }
+  }
+  return checks.filter(([bad]) => bad).map(([, label]) => label);
 }
 
 function invalid(message: string): ModelOutput {
@@ -253,14 +356,17 @@ function evaluateDcf(input: {
   growth: number;
   normalizedFcfMargin: number;
   discountRate: number;
-  terminalGrowth: number;
+  terminal: TerminalParams;
 }): DcfEvaluation {
   const revenues = forecastRevenues(input.baseRevenue, input.growth);
   const fcf = revenues.map((revenue) => revenue * input.normalizedFcfMargin);
   const pvFcfByYear = fcf.map((value, index) => value / Math.pow(1 + input.discountRate, index + 1));
   const pvFcf = pvFcfByYear.reduce((sum, value) => sum + value, 0);
-  const terminalFcf = fcf[4] * (1 + input.terminalGrowth);
-  const terminalValue = terminalFcf / (input.discountRate - input.terminalGrowth);
+  const terminalValue =
+    input.terminal.terminalMethod === "exit-multiple"
+      ? terminalMetricValue(input.terminal.exitMetric, revenues[4], fcf[4], input.terminal.normalizedEbitdaMargin) *
+        input.terminal.exitMultiple
+      : (fcf[4] * (1 + input.terminal.terminalGrowth)) / (input.discountRate - input.terminal.terminalGrowth);
   const pvTerminalValue = terminalValue / Math.pow(1 + input.discountRate, 5);
   return {
     revenues,
@@ -270,6 +376,18 @@ function evaluateDcf(input: {
     pvTerminalValue,
     intrinsicEv: pvFcf + pvTerminalValue
   };
+}
+
+function terminalMetricValue(metric: ExitMetric, revenueY5: number, fcfY5: number, ebitdaMargin: number | null): number {
+  switch (metric) {
+    case "revenue":
+      return revenueY5;
+    case "ebitda":
+      return revenueY5 * (ebitdaMargin ?? 0);
+    case "fcf":
+    default:
+      return fcfY5;
+  }
 }
 
 function makeDiagnostics(input: {
@@ -320,34 +438,63 @@ function makeGridRows(input: {
   baseRevenue: number;
   normalizedFcfMargin: number;
   discountRate: number;
-  terminalGrowth: number;
+  terminal: TerminalParams;
   impliedRevenueCagr: number | null;
 }): ModelCell[] {
   const growth = input.impliedRevenueCagr ?? 0;
   const revenues = forecastRevenues(input.baseRevenue, growth);
   const fcf = revenues.map((revenue) => revenue * input.normalizedFcfMargin);
+  const ebitda = revenues.map((revenue) => revenue * (input.terminal.normalizedEbitdaMargin ?? 0));
   const discountFactors = Array.from({ length: 5 }, (_, index) => 1 / Math.pow(1 + input.discountRate, index + 1));
   const pvFcf = fcf.map((value, index) => value * discountFactors[index]);
-  const terminalValue =
-    input.discountRate > input.terminalGrowth
-      ? (fcf[4] * (1 + input.terminalGrowth)) / (input.discountRate - input.terminalGrowth)
+  const isExit = input.terminal.terminalMethod === "exit-multiple";
+  const terminalValue = isExit
+    ? terminalMetricValue(input.terminal.exitMetric, revenues[4], fcf[4], input.terminal.normalizedEbitdaMargin) *
+      input.terminal.exitMultiple
+    : input.discountRate > input.terminal.terminalGrowth
+      ? (fcf[4] * (1 + input.terminal.terminalGrowth)) / (input.discountRate - input.terminal.terminalGrowth)
       : null;
   const pvTerminalValue = terminalValue === null ? null : terminalValue * discountFactors[4];
   const intrinsicEv = pvFcf.reduce((sum, value) => sum + value, 0) + (pvTerminalValue ?? 0);
 
-  return [
+  const rows: ModelCell[] = [
     { label: "Revenue", kind: "calculated", values: [input.baseRevenue, ...revenues, null], format: "currency" },
     { label: "Revenue growth", kind: "solved", values: [null, ...Array(5).fill(input.impliedRevenueCagr), null], format: "percent" },
     { label: "Normalized FCF margin", kind: "assumption", values: [null, ...Array(5).fill(input.normalizedFcfMargin), null], format: "percent" },
-    { label: "Free cash flow", kind: "calculated", values: [null, ...fcf, null], format: "currency" },
+    { label: "Free cash flow", kind: "calculated", values: [null, ...fcf, null], format: "currency" }
+  ];
+  if (isExit && input.terminal.exitMetric === "ebitda") {
+    rows.push({ label: "EBITDA margin", kind: "assumption", values: [null, ...Array(5).fill(input.terminal.normalizedEbitdaMargin), null], format: "percent" });
+    rows.push({ label: "EBITDA", kind: "calculated", values: [null, ...ebitda, null], format: "currency" });
+  }
+  rows.push(
     { label: "Discount rate", kind: "assumption", values: [null, ...Array(5).fill(input.discountRate), null], format: "percent" },
     { label: "Discount factor", kind: "calculated", values: [null, ...discountFactors, null], format: "number" },
-    { label: "PV of FCF", kind: "calculated", values: [null, ...pvFcf, null], format: "currency" },
-    { label: "Terminal growth", kind: "assumption", values: [null, null, null, null, null, input.terminalGrowth, null], format: "percent" },
+    { label: "PV of FCF", kind: "calculated", values: [null, ...pvFcf, null], format: "currency" }
+  );
+  if (isExit) {
+    rows.push({ label: `Exit multiple (${exitMetricLabel(input.terminal.exitMetric)})`, kind: "assumption", values: [null, null, null, null, null, input.terminal.exitMultiple, null], format: "multiple" });
+  } else {
+    rows.push({ label: "Terminal growth", kind: "assumption", values: [null, null, null, null, null, input.terminal.terminalGrowth, null], format: "percent" });
+  }
+  rows.push(
     { label: "Terminal value", kind: "calculated", values: [null, null, null, null, null, terminalValue, null], format: "currency" },
     { label: "PV terminal value", kind: "calculated", values: [null, null, null, null, null, pvTerminalValue, null], format: "currency" },
     { label: "Intrinsic EV", kind: "calculated", values: [null, null, null, null, null, null, intrinsicEv], format: "currency" },
     { label: "Current EV", kind: "actual", values: [null, null, null, null, null, null, input.enterpriseValue], format: "currency" },
     { label: "Implied 5Y revenue CAGR", kind: "solved", values: [null, null, null, null, null, null, input.impliedRevenueCagr], format: "percent" }
-  ];
+  );
+  return rows;
+}
+
+function exitMetricLabel(metric: ExitMetric): string {
+  switch (metric) {
+    case "revenue":
+      return "EV/Revenue";
+    case "ebitda":
+      return "EV/EBITDA";
+    case "fcf":
+    default:
+      return "EV/FCF";
+  }
 }

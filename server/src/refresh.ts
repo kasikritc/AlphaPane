@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { BasePeriod, EvBridge, FinancialBase } from "@alphapane/shared";
+import type { BasePeriod, EvBridge, ExitMetric, ExitMultipleStat, FinancialBase } from "@alphapane/shared";
 import { TRIAL_COMPANIES } from "@alphapane/shared";
 import { FiscalClient } from "./fiscalClient.js";
 import { cagr, defaultDiscountRate, median, normalizeTerminalGrowth } from "./math.js";
@@ -133,6 +133,9 @@ function deriveFinancialSnapshot(
     : chooseNormalizedFcfMargin(fcfHistory, ratios);
   const terminalGrowthDefault = normalizeTerminalGrowth(historicalRevenueCagr5y);
   const discountRateDefault = defaultDiscountRate(typeof profile.sector === "string" ? profile.sector : null);
+  const exitMultipleStats = buildExitMultipleStats(ratios);
+  const exitDefaults = chooseExitDefaults(exitMultipleStats);
+  const ebitdaMarginDefault = chooseNormalizedEbitdaMargin(ratios);
 
   return {
     latestRevenue,
@@ -145,13 +148,68 @@ function deriveFinancialSnapshot(
     normalizedFcfMarginDefault: marginDefault.value,
     terminalGrowthDefault,
     discountRateDefault,
+    terminalMethodDefault: exitDefaults.method,
+    exitMetricDefault: exitDefaults.metric,
+    exitMultipleDefault: exitDefaults.multiple,
+    normalizedEbitdaMarginDefault: ebitdaMarginDefault.value,
+    exitMultipleStats,
     latestRevenueSource,
     normalizedFcfMarginSource: marginDefault.source,
     historicalRevenueCagr5ySource,
+    exitMultipleSource: exitDefaults.source,
+    normalizedEbitdaMarginSource: ebitdaMarginDefault.source,
     revenueHistory,
     fcfHistory,
     sourceLinks: extractSourceLinks(income)
   };
+}
+
+const EXIT_MULTIPLE_CONFIG: Array<{ metric: ExitMetric; label: string; ratioId: string }> = [
+  { metric: "fcf", label: "EV/FCF", ratioId: "ratio_ev_to_fcf" },
+  { metric: "ebitda", label: "EV/EBITDA", ratioId: "ratio_ev_to_ebitda" },
+  { metric: "revenue", label: "EV/Revenue", ratioId: "ratio_ev_to_sales" }
+];
+
+function buildExitMultipleStats(ratios: Record<string, unknown>): ExitMultipleStat[] {
+  return EXIT_MULTIPLE_CONFIG.map(({ metric, label, ratioId }) => {
+    const series = annualRatioValues(ratios, ratioId).slice(-5).filter(isPositive);
+    const current = ratioValue(ratios, ratioId);
+    return {
+      metric,
+      label,
+      current,
+      low: series.length ? Math.min(...series) : null,
+      median: median(series),
+      high: series.length ? Math.max(...series) : null,
+      source: series.length ? `5Y median ${label}` : null
+    };
+  });
+}
+
+function chooseExitDefaults(stats: ExitMultipleStat[]): {
+  method: "perpetuity";
+  metric: ExitMetric;
+  multiple: number | null;
+  source: string | null;
+} {
+  for (const stat of stats) {
+    if (isPositive(stat.median)) {
+      return { method: "perpetuity", metric: stat.metric, multiple: stat.median, source: stat.source };
+    }
+  }
+  return { method: "perpetuity", metric: "fcf", multiple: null, source: null };
+}
+
+function chooseNormalizedEbitdaMargin(ratios: Record<string, unknown>): { value: number | null; source: string | null } {
+  const fiveYearMedian = median(annualRatioValues(ratios, "ratio_ebitda_margin").slice(-5));
+  if (isPositive(fiveYearMedian)) {
+    return { value: fiveYearMedian, source: "5Y median EBITDA margin" };
+  }
+  const latest = ratioValue(ratios, "ratio_ebitda_margin");
+  if (isPositive(latest)) {
+    return { value: latest, source: "Data fallback: latest ratio_ebitda_margin" };
+  }
+  return { value: fiveYearMedian ?? latest, source: null };
 }
 
 export function buildFinancialBases(incomeRows: StandardizedRow[], cashFlowRows: StandardizedRow[]): {

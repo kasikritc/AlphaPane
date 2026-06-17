@@ -1,7 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { AssumptionSet, AssumptionSources, BasePeriod, ColumnPreference, CompanyDetail, CompanyRow, EvBridge, FinancialBase, ModelCell, ModelDiagnostics, RefreshRun, ValuationDetail, ValuationHistoryPoint, ValuationMetricKey, ValuationMetricStats, ValuationRow } from "@alphapane/shared";
+import type { AssumptionSet, AssumptionSources, BasePeriod, ColumnPreference, CompanyDetail, CompanyRow, EvBridge, ExitMetric, ExitMultipleStat, FinancialBase, ModelCell, ModelDiagnostics, RefreshRun, SensitivityTable, TerminalMethod, ValuationDetail, ValuationHistoryPoint, ValuationMetricKey, ValuationMetricStats, ValuationRow } from "@alphapane/shared";
 import { TRIAL_COMPANIES } from "@alphapane/shared";
-import { buildModel, median } from "./math.js";
+import { buildModel, buildSensitivity, median } from "./math.js";
 import { VALUATION_RATIOS } from "./valuation.js";
 import type { ValuationSnapshotInput } from "./valuation.js";
 
@@ -32,10 +32,20 @@ interface JoinedCompany {
   historical_revenue_cagr_5y_source: string | null;
   discount_rate_default: number | null;
   terminal_growth_default: number | null;
+  terminal_method_default: string | null;
+  exit_metric_default: string | null;
+  exit_multiple_default: number | null;
+  exit_multiple_source: string | null;
+  normalized_ebitda_margin_default: number | null;
+  normalized_ebitda_margin_source: string | null;
   override_base_period: string | null;
   override_margin: number | null;
   override_discount_rate: number | null;
   override_terminal_growth: number | null;
+  override_terminal_method: string | null;
+  override_exit_metric: string | null;
+  override_exit_multiple: number | null;
+  override_normalized_ebitda_margin: number | null;
   implied_revenue_cagr: number | null;
   cagr_gap: number | null;
   signal: CompanyRow["signal"];
@@ -55,11 +65,11 @@ export function getCompanyDetail(db: DatabaseSync, companyKey: string): CompanyD
   const joined = db.prepare(`${rowSql()} WHERE c.company_key = ?`).get(companyKey) as unknown as JoinedCompany | undefined;
   if (!joined) return null;
   const financial = db
-    .prepare("SELECT base_financials_json, ev_bridge_json, revenue_history_json, fcf_history_json, source_links_json FROM financial_snapshots WHERE company_key = ?")
-    .get(companyKey) as { base_financials_json?: string; ev_bridge_json?: string; revenue_history_json?: string; fcf_history_json?: string; source_links_json?: string } | undefined;
+    .prepare("SELECT base_financials_json, ev_bridge_json, exit_multiple_stats_json, revenue_history_json, fcf_history_json, source_links_json FROM financial_snapshots WHERE company_key = ?")
+    .get(companyKey) as { base_financials_json?: string; ev_bridge_json?: string; exit_multiple_stats_json?: string; revenue_history_json?: string; fcf_history_json?: string; source_links_json?: string } | undefined;
   const model = db
-    .prepare("SELECT model_grid_json, diagnostics_json FROM model_outputs WHERE company_key = ?")
-    .get(companyKey) as { model_grid_json?: string; diagnostics_json?: string } | undefined;
+    .prepare("SELECT model_grid_json, diagnostics_json, sensitivity_json FROM model_outputs WHERE company_key = ?")
+    .get(companyKey) as { model_grid_json?: string; diagnostics_json?: string; sensitivity_json?: string } | undefined;
 
   const overrides = getAssumptionOverrides(joined);
   const defaults = getAssumptionDefaults(joined);
@@ -76,6 +86,8 @@ export function getCompanyDetail(db: DatabaseSync, companyKey: string): CompanyD
     baseFinancials: { selected, ...bases },
     evBridge,
     diagnostics: parseJson<ModelDiagnostics | null>(model?.diagnostics_json, null),
+    exitMultipleStats: parseJson<ExitMultipleStat[]>(financial?.exit_multiple_stats_json, []),
+    sensitivity: parseJson<SensitivityTable[]>(model?.sensitivity_json, []),
     gridColumns: GRID_COLUMNS,
     gridRows,
     revenueHistory: parseJson(financial?.revenue_history_json, []),
@@ -107,18 +119,27 @@ export function saveAssumptions(db: DatabaseSync, companyKey: string, input: Par
         normalized_fcf_margin: number | null;
         discount_rate: number | null;
         terminal_growth: number | null;
+        terminal_method: string | null;
+        exit_metric: string | null;
+        exit_multiple: number | null;
+        normalized_ebitda_margin: number | null;
       }
     | undefined;
   db.prepare(`
     INSERT INTO assumption_overrides (
-      company_key, base_period, normalized_fcf_margin, discount_rate, terminal_growth, updated_at
+      company_key, base_period, normalized_fcf_margin, discount_rate, terminal_growth,
+      terminal_method, exit_metric, exit_multiple, normalized_ebitda_margin, updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(company_key) DO UPDATE SET
       base_period = excluded.base_period,
       normalized_fcf_margin = excluded.normalized_fcf_margin,
       discount_rate = excluded.discount_rate,
       terminal_growth = excluded.terminal_growth,
+      terminal_method = excluded.terminal_method,
+      exit_metric = excluded.exit_metric,
+      exit_multiple = excluded.exit_multiple,
+      normalized_ebitda_margin = excluded.normalized_ebitda_margin,
       updated_at = excluded.updated_at
   `).run(
     companyKey,
@@ -126,6 +147,10 @@ export function saveAssumptions(db: DatabaseSync, companyKey: string, input: Par
     cleanNumber(input.normalizedFcfMargin, current?.normalized_fcf_margin ?? null),
     cleanNumber(input.discountRate, current?.discount_rate ?? null),
     cleanNumber(input.terminalGrowth, current?.terminal_growth ?? null),
+    cleanTerminalMethod(input.terminalMethod, cleanTerminalMethod(current?.terminal_method, null)),
+    cleanExitMetric(input.exitMetric, cleanExitMetric(current?.exit_metric, null)),
+    cleanNumber(input.exitMultiple, current?.exit_multiple ?? null),
+    cleanNumber(input.normalizedEbitdaMargin, current?.normalized_ebitda_margin ?? null),
     now()
   );
   recomputeModels(db, [companyKey]);
@@ -354,9 +379,16 @@ export function upsertFinancialSnapshot(
     normalizedFcfMarginDefault: number | null;
     terminalGrowthDefault: number | null;
     discountRateDefault: number | null;
+    terminalMethodDefault: TerminalMethod | null;
+    exitMetricDefault: ExitMetric | null;
+    exitMultipleDefault: number | null;
+    normalizedEbitdaMarginDefault: number | null;
+    exitMultipleStats: ExitMultipleStat[];
     latestRevenueSource: string | null;
     normalizedFcfMarginSource: string | null;
     historicalRevenueCagr5ySource: string | null;
+    exitMultipleSource: string | null;
+    normalizedEbitdaMarginSource: string | null;
     revenueHistory: unknown[];
     fcfHistory: unknown[];
     sourceLinks: unknown[];
@@ -367,10 +399,13 @@ export function upsertFinancialSnapshot(
       company_key, latest_revenue, latest_revenue_year, latest_revenue_report_date,
       historical_revenue_cagr_5y, base_period_default, base_financials_json, ev_bridge_json, normalized_fcf_margin_default, normalized_fcf_margin_source,
       latest_revenue_source, historical_revenue_cagr_5y_source,
-      terminal_growth_default, discount_rate_default, revenue_history_json,
+      terminal_growth_default, discount_rate_default,
+      terminal_method_default, exit_metric_default, exit_multiple_default, exit_multiple_source,
+      normalized_ebitda_margin_default, normalized_ebitda_margin_source, exit_multiple_stats_json,
+      revenue_history_json,
       fcf_history_json, source_links_json, updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(company_key) DO UPDATE SET
       latest_revenue = excluded.latest_revenue,
       latest_revenue_year = excluded.latest_revenue_year,
@@ -385,6 +420,13 @@ export function upsertFinancialSnapshot(
       historical_revenue_cagr_5y_source = excluded.historical_revenue_cagr_5y_source,
       terminal_growth_default = excluded.terminal_growth_default,
       discount_rate_default = excluded.discount_rate_default,
+      terminal_method_default = excluded.terminal_method_default,
+      exit_metric_default = excluded.exit_metric_default,
+      exit_multiple_default = excluded.exit_multiple_default,
+      exit_multiple_source = excluded.exit_multiple_source,
+      normalized_ebitda_margin_default = excluded.normalized_ebitda_margin_default,
+      normalized_ebitda_margin_source = excluded.normalized_ebitda_margin_source,
+      exit_multiple_stats_json = excluded.exit_multiple_stats_json,
       revenue_history_json = excluded.revenue_history_json,
       fcf_history_json = excluded.fcf_history_json,
       source_links_json = excluded.source_links_json,
@@ -404,6 +446,13 @@ export function upsertFinancialSnapshot(
     input.historicalRevenueCagr5ySource,
     input.terminalGrowthDefault,
     input.discountRateDefault,
+    input.terminalMethodDefault,
+    input.exitMetricDefault,
+    input.exitMultipleDefault,
+    input.exitMultipleSource,
+    input.normalizedEbitdaMarginDefault,
+    input.normalizedEbitdaMarginSource,
+    JSON.stringify(input.exitMultipleStats ?? []),
     JSON.stringify(input.revenueHistory),
     JSON.stringify(input.fcfHistory),
     JSON.stringify(input.sourceLinks),
@@ -423,7 +472,11 @@ export function recomputeModels(db: DatabaseSync, companyKeys: readonly string[]
       COALESCE(a.base_period, f.base_period_default) AS base_period,
       COALESCE(a.normalized_fcf_margin, f.normalized_fcf_margin_default) AS normalized_fcf_margin,
       COALESCE(a.discount_rate, f.discount_rate_default) AS discount_rate,
-      COALESCE(a.terminal_growth, f.terminal_growth_default) AS terminal_growth
+      COALESCE(a.terminal_growth, f.terminal_growth_default) AS terminal_growth,
+      COALESCE(a.terminal_method, f.terminal_method_default) AS terminal_method,
+      COALESCE(a.exit_metric, f.exit_metric_default) AS exit_metric,
+      COALESCE(a.exit_multiple, f.exit_multiple_default) AS exit_multiple,
+      COALESCE(a.normalized_ebitda_margin, f.normalized_ebitda_margin_default) AS normalized_ebitda_margin
     FROM companies c
     LEFT JOIN market_snapshots m ON m.company_key = c.company_key
     LEFT JOIN financial_snapshots f ON f.company_key = c.company_key
@@ -433,15 +486,16 @@ export function recomputeModels(db: DatabaseSync, companyKeys: readonly string[]
   const upsert = db.prepare(`
     INSERT INTO model_outputs (
       company_key, implied_revenue_cagr, cagr_gap,
-      signal, model_grid_json, diagnostics_json, status, status_message, updated_at
+      signal, model_grid_json, diagnostics_json, sensitivity_json, status, status_message, updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(company_key) DO UPDATE SET
       implied_revenue_cagr = excluded.implied_revenue_cagr,
       cagr_gap = excluded.cagr_gap,
       signal = excluded.signal,
       model_grid_json = excluded.model_grid_json,
       diagnostics_json = excluded.diagnostics_json,
+      sensitivity_json = excluded.sensitivity_json,
       status = excluded.status,
       status_message = excluded.status_message,
       updated_at = excluded.updated_at
@@ -451,14 +505,20 @@ export function recomputeModels(db: DatabaseSync, companyKeys: readonly string[]
     if (!row) continue;
     const bases = parseBaseFinancials(stringOrUndefined(row.base_financials_json));
     const base = baseByPeriod(cleanBasePeriod(row.base_period, null), bases);
-    const output = buildModel({
+    const dcfInputs = {
       enterpriseValue: numberOrNull(row.enterprise_value),
       baseRevenue: numberOrNull(base?.revenue) ?? numberOrNull(row.latest_revenue),
       normalizedFcfMargin: numberOrNull(row.normalized_fcf_margin),
       discountRate: numberOrNull(row.discount_rate),
       terminalGrowth: numberOrNull(row.terminal_growth),
-      historicalRevenueCagr5y: numberOrNull(row.historical_revenue_cagr_5y)
-    });
+      historicalRevenueCagr5y: numberOrNull(row.historical_revenue_cagr_5y),
+      terminalMethod: cleanTerminalMethod(row.terminal_method),
+      exitMetric: cleanExitMetric(row.exit_metric),
+      exitMultiple: numberOrNull(row.exit_multiple),
+      normalizedEbitdaMargin: numberOrNull(row.normalized_ebitda_margin)
+    };
+    const output = buildModel(dcfInputs);
+    const sensitivity = buildSensitivity(dcfInputs);
     upsert.run(
       companyKey,
       output.impliedRevenueCagr,
@@ -466,6 +526,7 @@ export function recomputeModels(db: DatabaseSync, companyKeys: readonly string[]
       output.signal,
       JSON.stringify(output.gridRows),
       JSON.stringify(output.diagnostics),
+      JSON.stringify(sensitivity),
       output.status,
       output.statusMessage,
       now()
@@ -482,11 +543,17 @@ function rowSql(): string {
       f.latest_revenue, f.historical_revenue_cagr_5y, f.base_period_default, f.base_financials_json, f.ev_bridge_json,
       f.normalized_fcf_margin_default, f.normalized_fcf_margin_source, f.latest_revenue_source, f.historical_revenue_cagr_5y_source,
       f.discount_rate_default, f.terminal_growth_default,
+      f.terminal_method_default, f.exit_metric_default, f.exit_multiple_default, f.exit_multiple_source,
+      f.normalized_ebitda_margin_default, f.normalized_ebitda_margin_source,
       f.updated_at AS financials_updated_at,
       a.base_period AS override_base_period,
       a.normalized_fcf_margin AS override_margin,
       a.discount_rate AS override_discount_rate,
       a.terminal_growth AS override_terminal_growth,
+      a.terminal_method AS override_terminal_method,
+      a.exit_metric AS override_exit_metric,
+      a.exit_multiple AS override_exit_multiple,
+      a.normalized_ebitda_margin AS override_normalized_ebitda_margin,
       o.implied_revenue_cagr, o.cagr_gap, o.signal,
       o.updated_at AS model_updated_at,
       u.is_favorite, u.note
@@ -542,7 +609,9 @@ function getAssumptionSources(row: JoinedCompany): AssumptionSources {
   return {
     latestRevenue: baseByPeriod(cleanBasePeriod(row.override_base_period, cleanBasePeriod(row.base_period_default, null)), parseBaseFinancials(row.base_financials_json ?? undefined))?.source ?? row.latest_revenue_source,
     normalizedFcfMargin: row.override_margin !== null ? "User override" : row.normalized_fcf_margin_source,
-    historicalRevenueCagr5y: row.historical_revenue_cagr_5y_source
+    historicalRevenueCagr5y: row.historical_revenue_cagr_5y_source,
+    normalizedEbitdaMargin: row.override_normalized_ebitda_margin !== null ? "User override" : row.normalized_ebitda_margin_source,
+    exitMultiple: row.override_exit_multiple !== null ? "User override" : row.exit_multiple_source
   };
 }
 
@@ -551,7 +620,11 @@ function getAssumptionDefaults(row: JoinedCompany): AssumptionSet {
     basePeriod: cleanBasePeriod(row.base_period_default, null),
     normalizedFcfMargin: numberOrNull(row.normalized_fcf_margin_default),
     discountRate: numberOrNull(row.discount_rate_default),
-    terminalGrowth: numberOrNull(row.terminal_growth_default)
+    terminalGrowth: numberOrNull(row.terminal_growth_default),
+    terminalMethod: cleanTerminalMethod(row.terminal_method_default, "perpetuity"),
+    exitMetric: cleanExitMetric(row.exit_metric_default, "fcf"),
+    exitMultiple: numberOrNull(row.exit_multiple_default),
+    normalizedEbitdaMargin: numberOrNull(row.normalized_ebitda_margin_default)
   };
 }
 
@@ -560,7 +633,11 @@ function getAssumptionOverrides(row: JoinedCompany): AssumptionSet {
     basePeriod: cleanBasePeriod(row.override_base_period, null),
     normalizedFcfMargin: numberOrNull(row.override_margin),
     discountRate: numberOrNull(row.override_discount_rate),
-    terminalGrowth: numberOrNull(row.override_terminal_growth)
+    terminalGrowth: numberOrNull(row.override_terminal_growth),
+    terminalMethod: cleanTerminalMethod(row.override_terminal_method, null),
+    exitMetric: cleanExitMetric(row.override_exit_metric, null),
+    exitMultiple: numberOrNull(row.override_exit_multiple),
+    normalizedEbitdaMargin: numberOrNull(row.override_normalized_ebitda_margin)
   };
 }
 
@@ -640,15 +717,24 @@ function cleanBasePeriod(value: unknown, fallback: BasePeriod | null): BasePerio
   return value === "ltm" || value === "annual" ? value : fallback;
 }
 
+function cleanTerminalMethod(value: unknown, fallback: TerminalMethod | null = null): TerminalMethod | null {
+  return value === "perpetuity" || value === "exit-multiple" ? value : fallback;
+}
+
+function cleanExitMetric(value: unknown, fallback: ExitMetric | null = null): ExitMetric | null {
+  return value === "fcf" || value === "ebitda" || value === "revenue" ? value : fallback;
+}
+
 function markOverrides(rows: ModelCell[], overrides: AssumptionSet): ModelCell[] {
   const labels: Record<string, keyof AssumptionSet> = {
     "Base period": "basePeriod",
     "Normalized FCF margin": "normalizedFcfMargin",
     "Discount rate": "discountRate",
-    "Terminal growth": "terminalGrowth"
+    "Terminal growth": "terminalGrowth",
+    "EBITDA margin": "normalizedEbitdaMargin"
   };
   return rows.map((row) => {
-    const overrideKey = labels[row.label];
+    const overrideKey = row.label.startsWith("Exit multiple") ? "exitMultiple" : labels[row.label];
     return overrideKey && overrides[overrideKey] !== null ? { ...row, kind: "override" } : row;
   });
 }

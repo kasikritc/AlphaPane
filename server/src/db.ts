@@ -108,6 +108,13 @@ function migrate(db: DatabaseSync): void {
       historical_revenue_cagr_5y_source TEXT,
       terminal_growth_default REAL,
       discount_rate_default REAL,
+      terminal_method_default TEXT,
+      exit_metric_default TEXT,
+      exit_multiple_default REAL,
+      exit_multiple_source TEXT,
+      normalized_ebitda_margin_default REAL,
+      normalized_ebitda_margin_source TEXT,
+      exit_multiple_stats_json TEXT NOT NULL DEFAULT '[]',
       revenue_history_json TEXT NOT NULL DEFAULT '[]',
       fcf_history_json TEXT NOT NULL DEFAULT '[]',
       source_links_json TEXT NOT NULL DEFAULT '[]',
@@ -120,6 +127,10 @@ function migrate(db: DatabaseSync): void {
       normalized_fcf_margin REAL,
       discount_rate REAL,
       terminal_growth REAL,
+      terminal_method TEXT,
+      exit_metric TEXT,
+      exit_multiple REAL,
+      normalized_ebitda_margin REAL,
       updated_at TEXT
     );
 
@@ -137,6 +148,7 @@ function migrate(db: DatabaseSync): void {
       signal TEXT NOT NULL DEFAULT 'insufficient data',
       model_grid_json TEXT NOT NULL DEFAULT '[]',
       diagnostics_json TEXT NOT NULL DEFAULT '{}',
+      sensitivity_json TEXT NOT NULL DEFAULT '[]',
       status TEXT NOT NULL DEFAULT 'insufficient-data',
       status_message TEXT,
       updated_at TEXT
@@ -173,8 +185,20 @@ function migrate(db: DatabaseSync): void {
   addColumnIfMissing(db, 'financial_snapshots', 'normalized_fcf_margin_source', 'TEXT');
   addColumnIfMissing(db, 'financial_snapshots', 'latest_revenue_source', 'TEXT');
   addColumnIfMissing(db, 'financial_snapshots', 'historical_revenue_cagr_5y_source', 'TEXT');
+  addColumnIfMissing(db, 'financial_snapshots', 'terminal_method_default', 'TEXT');
+  addColumnIfMissing(db, 'financial_snapshots', 'exit_metric_default', 'TEXT');
+  addColumnIfMissing(db, 'financial_snapshots', 'exit_multiple_default', 'REAL');
+  addColumnIfMissing(db, 'financial_snapshots', 'exit_multiple_source', 'TEXT');
+  addColumnIfMissing(db, 'financial_snapshots', 'normalized_ebitda_margin_default', 'REAL');
+  addColumnIfMissing(db, 'financial_snapshots', 'normalized_ebitda_margin_source', 'TEXT');
+  addColumnIfMissing(db, 'financial_snapshots', 'exit_multiple_stats_json', "TEXT NOT NULL DEFAULT '[]'");
   addColumnIfMissing(db, 'assumption_overrides', 'base_period', 'TEXT');
+  addColumnIfMissing(db, 'assumption_overrides', 'terminal_method', 'TEXT');
+  addColumnIfMissing(db, 'assumption_overrides', 'exit_metric', 'TEXT');
+  addColumnIfMissing(db, 'assumption_overrides', 'exit_multiple', 'REAL');
+  addColumnIfMissing(db, 'assumption_overrides', 'normalized_ebitda_margin', 'REAL');
   addColumnIfMissing(db, 'model_outputs', 'diagnostics_json', "TEXT NOT NULL DEFAULT '{}'");
+  addColumnIfMissing(db, 'model_outputs', 'sensitivity_json', "TEXT NOT NULL DEFAULT '[]'");
 }
 
 function addColumnIfMissing(db: DatabaseSync, table: string, column: string, definition: string): void {
