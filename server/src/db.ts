@@ -103,10 +103,8 @@ function migrate(db: DatabaseSync): void {
       normalized_fcf_margin_source TEXT,
       latest_revenue_source TEXT,
       historical_revenue_cagr_5y_source TEXT,
-      exit_revenue_multiple_source TEXT,
       terminal_growth_default REAL,
       discount_rate_default REAL,
-      exit_revenue_multiple_default REAL,
       revenue_history_json TEXT NOT NULL DEFAULT '[]',
       fcf_history_json TEXT NOT NULL DEFAULT '[]',
       source_links_json TEXT NOT NULL DEFAULT '[]',
@@ -118,7 +116,6 @@ function migrate(db: DatabaseSync): void {
       normalized_fcf_margin REAL,
       discount_rate REAL,
       terminal_growth REAL,
-      exit_revenue_multiple REAL,
       updated_at TEXT
     );
 
@@ -132,7 +129,6 @@ function migrate(db: DatabaseSync): void {
     CREATE TABLE IF NOT EXISTS model_outputs (
       company_key TEXT PRIMARY KEY REFERENCES companies(company_key) ON DELETE CASCADE,
       implied_revenue_cagr REAL,
-      implied_revenue_cagr_exit REAL,
       cagr_gap REAL,
       signal TEXT NOT NULL DEFAULT 'insufficient data',
       model_grid_json TEXT NOT NULL DEFAULT '[]',
@@ -169,7 +165,6 @@ function migrate(db: DatabaseSync): void {
   addColumnIfMissing(db, 'financial_snapshots', 'normalized_fcf_margin_source', 'TEXT');
   addColumnIfMissing(db, 'financial_snapshots', 'latest_revenue_source', 'TEXT');
   addColumnIfMissing(db, 'financial_snapshots', 'historical_revenue_cagr_5y_source', 'TEXT');
-  addColumnIfMissing(db, 'financial_snapshots', 'exit_revenue_multiple_source', 'TEXT');
 }
 
 function addColumnIfMissing(db: DatabaseSync, table: string, column: string, definition: string): void {
@@ -190,4 +185,3 @@ function seedTrialCompanies(db: DatabaseSync): void {
     insert.run(companyKey, ticker, exchange, SEEDED_NAMES[companyKey] ?? ticker, now);
   }
 }
-

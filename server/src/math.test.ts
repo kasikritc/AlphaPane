@@ -30,8 +30,7 @@ describe("math utilities", () => {
       normalizedFcfMargin: 0.25,
       discountRate: 0.1,
       terminalGrowth: 0.03,
-      historicalRevenueCagr5y: 0.08,
-      exitRevenueMultiple: 8
+      historicalRevenueCagr5y: 0.08
     });
 
     expect(output.status).toBe("ok");
@@ -46,11 +45,9 @@ describe("math utilities", () => {
       normalizedFcfMargin: 0.2,
       discountRate: 0.03,
       terminalGrowth: 0.04,
-      historicalRevenueCagr5y: 0.08,
-      exitRevenueMultiple: 8
+      historicalRevenueCagr5y: 0.08
     });
 
     expect(output.status).toBe("invalid-assumptions");
   });
 });
-

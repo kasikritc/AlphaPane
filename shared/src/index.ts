@@ -72,12 +72,9 @@ export interface CompanyRow {
   normalizedFcfMarginSource: string | null;
   discountRate: number | null;
   terminalGrowth: number | null;
-  exitRevenueMultiple: number | null;
   latestRevenueSource: string | null;
   historicalRevenueCagrSource: string | null;
-  exitRevenueMultipleSource: string | null;
   impliedRevenueCagr: number | null;
-  impliedRevenueCagrExit: number | null;
   cagrGap: number | null;
   signal: Signal;
   isFavorite: boolean;
@@ -143,14 +140,12 @@ export interface AssumptionSet {
   normalizedFcfMargin: number | null;
   discountRate: number | null;
   terminalGrowth: number | null;
-  exitRevenueMultiple: number | null;
 }
 
 export interface AssumptionSources {
   latestRevenue: string | null;
   normalizedFcfMargin: string | null;
   historicalRevenueCagr5y: string | null;
-  exitRevenueMultiple: string | null;
 }
 
 export interface ModelCell {

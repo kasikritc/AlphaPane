@@ -51,7 +51,6 @@ const reverseColumns: TableColumn<CompanyRow>[] = [
   { key: "discountRate", label: "Discount", align: "right", render: (row) => percent(row.discountRate), sortValue: (row) => row.discountRate },
   { key: "terminalGrowth", label: "Terminal", align: "right", render: (row) => percent(row.terminalGrowth), sortValue: (row) => row.terminalGrowth },
   { key: "impliedRevenueCagr", label: "Priced-In CAGR", align: "right", render: (row) => strong(percent(row.impliedRevenueCagr)), sortValue: (row) => row.impliedRevenueCagr },
-  { key: "impliedRevenueCagrExit", label: "Exit CAGR", align: "right", render: (row) => percent(row.impliedRevenueCagrExit), sortValue: (row) => row.impliedRevenueCagrExit },
   { key: "cagrGap", label: "Gap", align: "right", render: (row) => percent(row.cagrGap), sortValue: (row) => row.cagrGap },
   { key: "signal", label: "Signal", render: (row) => <SignalPill signal={row.signal} />, sortValue: (row) => row.signal },
   { key: "financialsUpdatedAt", label: "Financials", render: (row) => dateShort(row.financialsUpdatedAt), sortValue: (row) => row.financialsUpdatedAt },
@@ -393,8 +392,7 @@ function ReverseDcfDetailView({ detail, onSaved }: { detail: CompanyDetail; onSa
   const [assumptions, setAssumptions] = useState({
     normalizedFcfMargin: detail.overrides.normalizedFcfMargin ?? detail.defaults.normalizedFcfMargin,
     discountRate: detail.overrides.discountRate ?? detail.defaults.discountRate,
-    terminalGrowth: detail.overrides.terminalGrowth ?? detail.defaults.terminalGrowth,
-    exitRevenueMultiple: detail.overrides.exitRevenueMultiple ?? detail.defaults.exitRevenueMultiple
+    terminalGrowth: detail.overrides.terminalGrowth ?? detail.defaults.terminalGrowth
   });
 
   useEffect(() => {
@@ -402,8 +400,7 @@ function ReverseDcfDetailView({ detail, onSaved }: { detail: CompanyDetail; onSa
     setAssumptions({
       normalizedFcfMargin: detail.overrides.normalizedFcfMargin ?? detail.defaults.normalizedFcfMargin,
       discountRate: detail.overrides.discountRate ?? detail.defaults.discountRate,
-      terminalGrowth: detail.overrides.terminalGrowth ?? detail.defaults.terminalGrowth,
-      exitRevenueMultiple: detail.overrides.exitRevenueMultiple ?? detail.defaults.exitRevenueMultiple
+      terminalGrowth: detail.overrides.terminalGrowth ?? detail.defaults.terminalGrowth
     });
   }, [detail]);
 
@@ -433,11 +430,10 @@ function ReverseDcfDetailView({ detail, onSaved }: { detail: CompanyDetail; onSa
           <InputPercent label="FCF margin" value={assumptions.normalizedFcfMargin} onChange={(value) => setAssumptions({ ...assumptions, normalizedFcfMargin: value })} />
           <InputPercent label="Discount rate" value={assumptions.discountRate} onChange={(value) => setAssumptions({ ...assumptions, discountRate: value })} />
           <InputPercent label="Terminal growth" value={assumptions.terminalGrowth} onChange={(value) => setAssumptions({ ...assumptions, terminalGrowth: value })} />
-          <label>Exit revenue multiple<input type="number" step="0.1" value={assumptions.exitRevenueMultiple ?? ""} onChange={(event) => setAssumptions({ ...assumptions, exitRevenueMultiple: parseInputNumber(event.target.value) })} /></label>
         </div>
         <button className="primary-action" onClick={() => void saveAssumptions()}>Save assumptions</button>
       </section>
-      <section className="section"><h3>Default Sources</h3><div className="source-grid"><Metric label="Revenue" value={detail.sources.latestRevenue ?? "-"} /><Metric label="FCF margin" value={detail.sources.normalizedFcfMargin ?? "-"} /><Metric label="History CAGR" value={detail.sources.historicalRevenueCagr5y ?? "-"} /><Metric label="Exit multiple" value={detail.sources.exitRevenueMultiple ?? "-"} /></div></section>
+      <section className="section"><h3>Default Sources</h3><div className="source-grid"><Metric label="Revenue" value={detail.sources.latestRevenue ?? "-"} /><Metric label="FCF margin" value={detail.sources.normalizedFcfMargin ?? "-"} /><Metric label="History CAGR" value={detail.sources.historicalRevenueCagr5y ?? "-"} /></div></section>
       <section className="section"><h3>Model Grid</h3><ModelGrid detail={detail} /></section>
       <NoteSection note={note} setNote={setNote} saveNote={saveNote} />
       <SourcesSection links={detail.sourceLinks} terminalUrl={detail.row.terminalUrl} />
@@ -618,11 +614,6 @@ function strong(value: string) {
 function parseInputPercent(value: string): number | null {
   const number = Number(value);
   return Number.isFinite(number) ? number / 100 : null;
-}
-
-function parseInputNumber(value: string): number | null {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : null;
 }
 
 function errorMessage(error: unknown): string {

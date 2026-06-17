@@ -61,8 +61,7 @@ export function createApp(db: DatabaseSync) {
     saveAssumptions(db, req.params.companyKey, {
       normalizedFcfMargin: cleanPercent(req.body.normalizedFcfMargin),
       discountRate: cleanPercent(req.body.discountRate),
-      terminalGrowth: cleanPercent(req.body.terminalGrowth),
-      exitRevenueMultiple: cleanNumber(req.body.exitRevenueMultiple)
+      terminalGrowth: cleanPercent(req.body.terminalGrowth)
     });
     res.json(getCompanyDetail(db, req.params.companyKey));
   });
@@ -106,14 +105,6 @@ function cleanPercent(value: unknown): number | null | undefined {
   return Number.isFinite(number) ? number : undefined;
 }
 
-function cleanNumber(value: unknown): number | null | undefined {
-  if (value === null) return null;
-  if (value === undefined || value === "") return undefined;
-  const number = Number(value);
-  return Number.isFinite(number) ? number : undefined;
-}
-
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
-

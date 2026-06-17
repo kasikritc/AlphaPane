@@ -26,16 +26,12 @@ interface JoinedCompany {
   normalized_fcf_margin_source: string | null;
   latest_revenue_source: string | null;
   historical_revenue_cagr_5y_source: string | null;
-  exit_revenue_multiple_source: string | null;
   discount_rate_default: number | null;
   terminal_growth_default: number | null;
-  exit_revenue_multiple_default: number | null;
   override_margin: number | null;
   override_discount_rate: number | null;
   override_terminal_growth: number | null;
-  override_exit_multiple: number | null;
   implied_revenue_cagr: number | null;
-  implied_revenue_cagr_exit: number | null;
   cagr_gap: number | null;
   signal: CompanyRow["signal"];
   financials_updated_at: string | null;
@@ -99,26 +95,23 @@ export function saveAssumptions(db: DatabaseSync, companyKey: string, input: Par
         normalized_fcf_margin: number | null;
         discount_rate: number | null;
         terminal_growth: number | null;
-        exit_revenue_multiple: number | null;
       }
     | undefined;
   db.prepare(`
     INSERT INTO assumption_overrides (
-      company_key, normalized_fcf_margin, discount_rate, terminal_growth, exit_revenue_multiple, updated_at
+      company_key, normalized_fcf_margin, discount_rate, terminal_growth, updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?)
     ON CONFLICT(company_key) DO UPDATE SET
       normalized_fcf_margin = excluded.normalized_fcf_margin,
       discount_rate = excluded.discount_rate,
       terminal_growth = excluded.terminal_growth,
-      exit_revenue_multiple = excluded.exit_revenue_multiple,
       updated_at = excluded.updated_at
   `).run(
     companyKey,
     cleanNumber(input.normalizedFcfMargin, current?.normalized_fcf_margin ?? null),
     cleanNumber(input.discountRate, current?.discount_rate ?? null),
     cleanNumber(input.terminalGrowth, current?.terminal_growth ?? null),
-    cleanNumber(input.exitRevenueMultiple, current?.exit_revenue_multiple ?? null),
     now()
   );
   recomputeModels(db, [companyKey]);
@@ -131,13 +124,11 @@ export function backfillFallbacksFromCache(db: DatabaseSync): void {
       f.latest_revenue,
       f.historical_revenue_cagr_5y,
       f.normalized_fcf_margin_default,
-      f.exit_revenue_multiple_default,
       f.revenue_history_json,
       f.fcf_history_json,
       f.latest_revenue_source,
       f.normalized_fcf_margin_source,
       f.historical_revenue_cagr_5y_source,
-      f.exit_revenue_multiple_source,
       m.enterprise_value,
       m.market_cap,
       m.ev_to_revenue,
@@ -151,11 +142,9 @@ export function backfillFallbacksFromCache(db: DatabaseSync): void {
     UPDATE financial_snapshots SET
       latest_revenue = ?,
       normalized_fcf_margin_default = ?,
-      exit_revenue_multiple_default = ?,
       latest_revenue_source = COALESCE(?, latest_revenue_source),
       normalized_fcf_margin_source = COALESCE(?, normalized_fcf_margin_source),
       historical_revenue_cagr_5y_source = COALESCE(historical_revenue_cagr_5y_source, ?),
-      exit_revenue_multiple_source = COALESCE(?, exit_revenue_multiple_source),
       updated_at = ?
     WHERE company_key = ?
   `);
@@ -172,22 +161,15 @@ export function backfillFallbacksFromCache(db: DatabaseSync): void {
     const normalizedFcfMarginSource = isPositive(currentMargin)
       ? nullableString(row.normalized_fcf_margin_source) ?? "5Y median FCF margin"
       : fcfFallback.source ?? nullableString(row.normalized_fcf_margin_source);
-    const exitFallback = chooseCachedExitMultiple(row);
-    const exitRevenueMultiple = numberOrNull(row.exit_revenue_multiple_default) ?? exitFallback.value;
-    const exitRevenueMultipleSource = numberOrNull(row.exit_revenue_multiple_default) !== null
-      ? nullableString(row.exit_revenue_multiple_source)
-      : exitFallback.source;
     const historySource = revenueHistory.length >= 6 ? "Standardized 5Y revenue history" : null;
 
-    if (latestRevenue !== null || normalizedFcfMargin !== null || exitRevenueMultiple !== null) {
+    if (latestRevenue !== null || normalizedFcfMargin !== null) {
       update.run(
         latestRevenue,
         normalizedFcfMargin,
-        exitRevenueMultiple,
         latestRevenueSource,
         normalizedFcfMarginSource,
         historySource,
-        exitRevenueMultipleSource,
         now(),
         row.company_key
       );
@@ -222,14 +204,6 @@ function inferRevenueFromCache(row: Record<string, unknown>): { value: number | 
   if (isPositive(marketCap) && isPositive(priceToSales)) {
     return { value: marketCap / priceToSales, source: "Inferred from market cap / P/S" };
   }
-  return { value: null, source: null };
-}
-
-function chooseCachedExitMultiple(row: Record<string, unknown>): { value: number | null; source: string | null } {
-  const evToRevenue = numberOrNull(row.ev_to_revenue);
-  if (isPositive(evToRevenue)) return { value: evToRevenue, source: "Data fallback: latest EV/Sales" };
-  const priceToSales = numberOrNull(row.price_to_sales);
-  if (isPositive(priceToSales)) return { value: priceToSales, source: "Data fallback: latest P/S" };
   return { value: null, source: null };
 }
 
@@ -361,11 +335,9 @@ export function upsertFinancialSnapshot(
     normalizedFcfMarginDefault: number | null;
     terminalGrowthDefault: number | null;
     discountRateDefault: number | null;
-    exitRevenueMultipleDefault: number | null;
     latestRevenueSource: string | null;
     normalizedFcfMarginSource: string | null;
     historicalRevenueCagr5ySource: string | null;
-    exitRevenueMultipleSource: string | null;
     revenueHistory: unknown[];
     fcfHistory: unknown[];
     sourceLinks: unknown[];
@@ -375,11 +347,11 @@ export function upsertFinancialSnapshot(
     INSERT INTO financial_snapshots (
       company_key, latest_revenue, latest_revenue_year, latest_revenue_report_date,
       historical_revenue_cagr_5y, normalized_fcf_margin_default, normalized_fcf_margin_source,
-      latest_revenue_source, historical_revenue_cagr_5y_source, exit_revenue_multiple_source,
-      terminal_growth_default, discount_rate_default, exit_revenue_multiple_default, revenue_history_json,
+      latest_revenue_source, historical_revenue_cagr_5y_source,
+      terminal_growth_default, discount_rate_default, revenue_history_json,
       fcf_history_json, source_links_json, updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(company_key) DO UPDATE SET
       latest_revenue = excluded.latest_revenue,
       latest_revenue_year = excluded.latest_revenue_year,
@@ -389,10 +361,8 @@ export function upsertFinancialSnapshot(
       normalized_fcf_margin_source = excluded.normalized_fcf_margin_source,
       latest_revenue_source = excluded.latest_revenue_source,
       historical_revenue_cagr_5y_source = excluded.historical_revenue_cagr_5y_source,
-      exit_revenue_multiple_source = excluded.exit_revenue_multiple_source,
       terminal_growth_default = excluded.terminal_growth_default,
       discount_rate_default = excluded.discount_rate_default,
-      exit_revenue_multiple_default = excluded.exit_revenue_multiple_default,
       revenue_history_json = excluded.revenue_history_json,
       fcf_history_json = excluded.fcf_history_json,
       source_links_json = excluded.source_links_json,
@@ -407,10 +377,8 @@ export function upsertFinancialSnapshot(
     input.normalizedFcfMarginSource,
     input.latestRevenueSource,
     input.historicalRevenueCagr5ySource,
-    input.exitRevenueMultipleSource,
     input.terminalGrowthDefault,
     input.discountRateDefault,
-    input.exitRevenueMultipleDefault,
     JSON.stringify(input.revenueHistory),
     JSON.stringify(input.fcfHistory),
     JSON.stringify(input.sourceLinks),
@@ -427,8 +395,7 @@ export function recomputeModels(db: DatabaseSync, companyKeys: readonly string[]
       f.historical_revenue_cagr_5y,
       COALESCE(a.normalized_fcf_margin, f.normalized_fcf_margin_default) AS normalized_fcf_margin,
       COALESCE(a.discount_rate, f.discount_rate_default) AS discount_rate,
-      COALESCE(a.terminal_growth, f.terminal_growth_default) AS terminal_growth,
-      COALESCE(a.exit_revenue_multiple, f.exit_revenue_multiple_default) AS exit_revenue_multiple
+      COALESCE(a.terminal_growth, f.terminal_growth_default) AS terminal_growth
     FROM companies c
     LEFT JOIN market_snapshots m ON m.company_key = c.company_key
     LEFT JOIN financial_snapshots f ON f.company_key = c.company_key
@@ -437,13 +404,12 @@ export function recomputeModels(db: DatabaseSync, companyKeys: readonly string[]
   `);
   const upsert = db.prepare(`
     INSERT INTO model_outputs (
-      company_key, implied_revenue_cagr, implied_revenue_cagr_exit, cagr_gap,
+      company_key, implied_revenue_cagr, cagr_gap,
       signal, model_grid_json, status, status_message, updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(company_key) DO UPDATE SET
       implied_revenue_cagr = excluded.implied_revenue_cagr,
-      implied_revenue_cagr_exit = excluded.implied_revenue_cagr_exit,
       cagr_gap = excluded.cagr_gap,
       signal = excluded.signal,
       model_grid_json = excluded.model_grid_json,
@@ -460,13 +426,11 @@ export function recomputeModels(db: DatabaseSync, companyKeys: readonly string[]
       normalizedFcfMargin: numberOrNull(row.normalized_fcf_margin),
       discountRate: numberOrNull(row.discount_rate),
       terminalGrowth: numberOrNull(row.terminal_growth),
-      historicalRevenueCagr5y: numberOrNull(row.historical_revenue_cagr_5y),
-      exitRevenueMultiple: numberOrNull(row.exit_revenue_multiple)
+      historicalRevenueCagr5y: numberOrNull(row.historical_revenue_cagr_5y)
     });
     upsert.run(
       companyKey,
       output.impliedRevenueCagr,
-      output.impliedRevenueCagrExit,
       output.cagrGap,
       output.signal,
       JSON.stringify(output.gridRows),
@@ -485,13 +449,12 @@ function rowSql(): string {
       m.share_price, m.enterprise_value, m.ev_to_revenue, m.updated_at AS prices_updated_at,
       f.latest_revenue, f.historical_revenue_cagr_5y, f.normalized_fcf_margin_default,
       f.normalized_fcf_margin_source, f.latest_revenue_source, f.historical_revenue_cagr_5y_source,
-      f.exit_revenue_multiple_source, f.discount_rate_default, f.terminal_growth_default, f.exit_revenue_multiple_default,
+      f.discount_rate_default, f.terminal_growth_default,
       f.updated_at AS financials_updated_at,
       a.normalized_fcf_margin AS override_margin,
       a.discount_rate AS override_discount_rate,
       a.terminal_growth AS override_terminal_growth,
-      a.exit_revenue_multiple AS override_exit_multiple,
-      o.implied_revenue_cagr, o.implied_revenue_cagr_exit, o.cagr_gap, o.signal,
+      o.implied_revenue_cagr, o.cagr_gap, o.signal,
       o.updated_at AS model_updated_at,
       u.is_favorite, u.note
     FROM companies c
@@ -507,7 +470,6 @@ function toCompanyRow(row: JoinedCompany): CompanyRow {
   const normalizedFcfMargin = row.override_margin ?? row.normalized_fcf_margin_default;
   const discountRate = row.override_discount_rate ?? row.discount_rate_default;
   const terminalGrowth = row.override_terminal_growth ?? row.terminal_growth_default;
-  const exitRevenueMultiple = row.override_exit_multiple ?? row.exit_revenue_multiple_default;
   return {
     companyKey: row.company_key,
     ticker: row.ticker,
@@ -525,13 +487,10 @@ function toCompanyRow(row: JoinedCompany): CompanyRow {
     normalizedFcfMargin: numberOrNull(normalizedFcfMargin),
     discountRate: numberOrNull(discountRate),
     terminalGrowth: numberOrNull(terminalGrowth),
-    exitRevenueMultiple: numberOrNull(exitRevenueMultiple),
     latestRevenueSource: row.latest_revenue_source,
     normalizedFcfMarginSource: row.override_margin !== null ? "User override" : row.normalized_fcf_margin_source,
     historicalRevenueCagrSource: row.historical_revenue_cagr_5y_source,
-    exitRevenueMultipleSource: row.override_exit_multiple !== null ? "User override" : row.exit_revenue_multiple_source,
     impliedRevenueCagr: numberOrNull(row.implied_revenue_cagr),
-    impliedRevenueCagrExit: numberOrNull(row.implied_revenue_cagr_exit),
     cagrGap: numberOrNull(row.cagr_gap),
     signal: row.signal ?? "insufficient data",
     isFavorite: Boolean(row.is_favorite),
@@ -547,8 +506,7 @@ function getAssumptionSources(row: JoinedCompany): AssumptionSources {
   return {
     latestRevenue: row.latest_revenue_source,
     normalizedFcfMargin: row.override_margin !== null ? "User override" : row.normalized_fcf_margin_source,
-    historicalRevenueCagr5y: row.historical_revenue_cagr_5y_source,
-    exitRevenueMultiple: row.override_exit_multiple !== null ? "User override" : row.exit_revenue_multiple_source
+    historicalRevenueCagr5y: row.historical_revenue_cagr_5y_source
   };
 }
 
@@ -556,8 +514,7 @@ function getAssumptionDefaults(row: JoinedCompany): AssumptionSet {
   return {
     normalizedFcfMargin: numberOrNull(row.normalized_fcf_margin_default),
     discountRate: numberOrNull(row.discount_rate_default),
-    terminalGrowth: numberOrNull(row.terminal_growth_default),
-    exitRevenueMultiple: numberOrNull(row.exit_revenue_multiple_default)
+    terminalGrowth: numberOrNull(row.terminal_growth_default)
   };
 }
 
@@ -565,8 +522,7 @@ function getAssumptionOverrides(row: JoinedCompany): AssumptionSet {
   return {
     normalizedFcfMargin: numberOrNull(row.override_margin),
     discountRate: numberOrNull(row.override_discount_rate),
-    terminalGrowth: numberOrNull(row.override_terminal_growth),
-    exitRevenueMultiple: numberOrNull(row.override_exit_multiple)
+    terminalGrowth: numberOrNull(row.override_terminal_growth)
   };
 }
 
@@ -574,8 +530,7 @@ function markOverrides(rows: ModelCell[], overrides: AssumptionSet): ModelCell[]
   const labels: Record<string, keyof AssumptionSet> = {
     "Normalized FCF margin": "normalizedFcfMargin",
     "Discount rate": "discountRate",
-    "Terminal growth": "terminalGrowth",
-    "Exit revenue multiple": "exitRevenueMultiple"
+    "Terminal growth": "terminalGrowth"
   };
   return rows.map((row) => {
     const overrideKey = labels[row.label];
@@ -746,4 +701,3 @@ function nullableString(value: unknown): string | null {
 function now(): string {
   return new Date().toISOString();
 }
-

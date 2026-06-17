@@ -17,12 +17,10 @@ export interface DcfInputs {
   discountRate: number | null;
   terminalGrowth: number | null;
   historicalRevenueCagr5y: number | null;
-  exitRevenueMultiple: number | null;
 }
 
 export interface ModelOutput {
   impliedRevenueCagr: number | null;
-  impliedRevenueCagrExit: number | null;
   cagrGap: number | null;
   signal: Signal;
   status: string;
@@ -84,7 +82,6 @@ export function buildModel(inputs: DcfInputs): ModelOutput {
   if (missing.length > 0) {
     return {
       impliedRevenueCagr: null,
-      impliedRevenueCagrExit: null,
       cagrGap: null,
       signal: "insufficient data",
       status: "insufficient-data",
@@ -98,7 +95,6 @@ export function buildModel(inputs: DcfInputs): ModelOutput {
   const normalizedFcfMargin = inputs.normalizedFcfMargin as number;
   const discountRate = inputs.discountRate as number;
   const terminalGrowth = inputs.terminalGrowth as number;
-  const exitRevenueMultiple = inputs.exitRevenueMultiple as number;
 
   if (normalizedFcfMargin <= 0) {
     return invalid("Normalized FCF margin must be positive for this reverse DCF.");
@@ -116,15 +112,6 @@ export function buildModel(inputs: DcfInputs): ModelOutput {
       terminalGrowth
     }) - enterpriseValue
   );
-  const impliedRevenueCagrExit = solveGrowth((growth) =>
-    intrinsicExitMultipleEv({
-      baseRevenue,
-      growth,
-      normalizedFcfMargin,
-      discountRate,
-      exitRevenueMultiple
-    }) - enterpriseValue
-  );
 
   const cagrGap =
     Number.isFinite(impliedRevenueCagr) && Number.isFinite(inputs.historicalRevenueCagr5y)
@@ -137,14 +124,11 @@ export function buildModel(inputs: DcfInputs): ModelOutput {
     normalizedFcfMargin,
     discountRate,
     terminalGrowth,
-    exitRevenueMultiple,
-    impliedRevenueCagr,
-    impliedRevenueCagrExit
+    impliedRevenueCagr
   });
 
   return {
     impliedRevenueCagr,
-    impliedRevenueCagrExit,
     cagrGap,
     signal,
     status: impliedRevenueCagr === null ? "outside-model-range" : "ok",
@@ -159,8 +143,7 @@ function requiredMissing(inputs: DcfInputs): string[] {
     ["baseRevenue", "base revenue"],
     ["normalizedFcfMargin", "normalized FCF margin"],
     ["discountRate", "discount rate"],
-    ["terminalGrowth", "terminal growth"],
-    ["exitRevenueMultiple", "exit revenue multiple"]
+    ["terminalGrowth", "terminal growth"]
   ];
   return checks
     .filter(([key]) => !Number.isFinite(inputs[key]))
@@ -170,7 +153,6 @@ function requiredMissing(inputs: DcfInputs): string[] {
 function invalid(message: string): ModelOutput {
   return {
     impliedRevenueCagr: null,
-    impliedRevenueCagrExit: null,
     cagrGap: null,
     signal: "insufficient data",
     status: "invalid-assumptions",
@@ -226,20 +208,6 @@ function intrinsicDcfEv(input: {
   return pvFcf + terminalValue / Math.pow(1 + input.discountRate, 5);
 }
 
-function intrinsicExitMultipleEv(input: {
-  baseRevenue: number;
-  growth: number;
-  normalizedFcfMargin: number;
-  discountRate: number;
-  exitRevenueMultiple: number;
-}): number {
-  const revenues = forecastRevenues(input.baseRevenue, input.growth);
-  const cashFlows = revenues.map((revenue) => revenue * input.normalizedFcfMargin);
-  const pvFcf = cashFlows.reduce((sum, fcf, index) => sum + fcf / Math.pow(1 + input.discountRate, index + 1), 0);
-  const exitEv = revenues[4] * input.exitRevenueMultiple;
-  return pvFcf + exitEv / Math.pow(1 + input.discountRate, 5);
-}
-
 function forecastRevenues(baseRevenue: number, growth: number): number[] {
   return Array.from({ length: 5 }, (_, index) => baseRevenue * Math.pow(1 + growth, index + 1));
 }
@@ -254,9 +222,7 @@ function makeGridRows(input: {
   normalizedFcfMargin: number;
   discountRate: number;
   terminalGrowth: number;
-  exitRevenueMultiple: number;
   impliedRevenueCagr: number | null;
-  impliedRevenueCagrExit: number | null;
 }): ModelCell[] {
   const growth = input.impliedRevenueCagr ?? 0;
   const revenues = forecastRevenues(input.baseRevenue, growth);
@@ -283,9 +249,6 @@ function makeGridRows(input: {
     { label: "PV terminal value", kind: "calculated", values: [null, null, null, null, null, pvTerminalValue, null], format: "currency" },
     { label: "Intrinsic EV", kind: "calculated", values: [null, null, null, null, null, null, intrinsicEv], format: "currency" },
     { label: "Current EV", kind: "actual", values: [null, null, null, null, null, null, input.enterpriseValue], format: "currency" },
-    { label: "Implied 5Y revenue CAGR", kind: "solved", values: [null, null, null, null, null, null, input.impliedRevenueCagr], format: "percent" },
-    { label: "Exit revenue multiple", kind: "assumption", values: [null, null, null, null, null, input.exitRevenueMultiple, null], format: "multiple" },
-    { label: "Exit multiple implied CAGR", kind: "solved", values: [null, null, null, null, null, null, input.impliedRevenueCagrExit], format: "percent" }
+    { label: "Implied 5Y revenue CAGR", kind: "solved", values: [null, null, null, null, null, null, input.impliedRevenueCagr], format: "percent" }
   ];
 }
-
