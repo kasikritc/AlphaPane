@@ -87,6 +87,8 @@ function migrate(db: DatabaseSync): void {
       ev_to_revenue REAL,
       price_to_sales REAL,
       price_to_earnings REAL,
+      ev_to_ebitda REAL,
+      fcf_yield REAL,
       as_of_date TEXT,
       updated_at TEXT
     );
@@ -162,6 +164,8 @@ function migrate(db: DatabaseSync): void {
       message TEXT
     );
   `);
+  addColumnIfMissing(db, 'market_snapshots', 'ev_to_ebitda', 'REAL');
+  addColumnIfMissing(db, 'market_snapshots', 'fcf_yield', 'REAL');
   addColumnIfMissing(db, 'financial_snapshots', 'normalized_fcf_margin_source', 'TEXT');
   addColumnIfMissing(db, 'financial_snapshots', 'latest_revenue_source', 'TEXT');
   addColumnIfMissing(db, 'financial_snapshots', 'historical_revenue_cagr_5y_source', 'TEXT');

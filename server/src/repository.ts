@@ -321,9 +321,9 @@ export function upsertMarketSnapshot(db: DatabaseSync, companyKey: string, lates
   db.prepare(`
     INSERT INTO market_snapshots (
       company_key, share_price, market_cap, enterprise_value, ev_to_revenue,
-      price_to_sales, price_to_earnings, as_of_date, updated_at
+      price_to_sales, price_to_earnings, ev_to_ebitda, fcf_yield, as_of_date, updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(company_key) DO UPDATE SET
       share_price = excluded.share_price,
       market_cap = excluded.market_cap,
@@ -331,6 +331,8 @@ export function upsertMarketSnapshot(db: DatabaseSync, companyKey: string, lates
       ev_to_revenue = excluded.ev_to_revenue,
       price_to_sales = excluded.price_to_sales,
       price_to_earnings = excluded.price_to_earnings,
+      ev_to_ebitda = excluded.ev_to_ebitda,
+      fcf_yield = excluded.fcf_yield,
       as_of_date = excluded.as_of_date,
       updated_at = excluded.updated_at
   `).run(
@@ -341,6 +343,8 @@ export function upsertMarketSnapshot(db: DatabaseSync, companyKey: string, lates
     numberOrNull(values.ratio_ev_to_sales),
     numberOrNull(values.ratio_price_to_sales),
     numberOrNull(values.ratio_price_to_earnings),
+    numberOrNull(values.ratio_ev_to_ebitda),
+    numberOrNull(values.ratio_fcf_yield),
     nullableString(latestRatioRow?.reportDate),
     now()
   );
@@ -589,6 +593,12 @@ interface ValuationJoined {
   industry: string | null;
   terminal_url: string | null;
   share_price: number | null;
+  current_pe: number | null;
+  current_ev_sales: number | null;
+  current_ev_ebitda: number | null;
+  current_price_sales: number | null;
+  current_fcf_yield: number | null;
+  market_updated_at: string | null;
   metrics_json?: string;
   pe_history_json?: string;
   pe_band_levels_json?: string;
@@ -636,7 +646,9 @@ function valuationRowSql(): string {
   return `
     SELECT
       c.company_key, c.ticker, c.exchange, c.name, c.sector, c.industry, c.terminal_url,
-      m.share_price,
+      m.share_price, m.price_to_earnings AS current_pe, m.ev_to_revenue AS current_ev_sales,
+      m.ev_to_ebitda AS current_ev_ebitda, m.price_to_sales AS current_price_sales,
+      m.fcf_yield AS current_fcf_yield, m.updated_at AS market_updated_at,
       v.metrics_json, v.pe_history_json, v.pe_band_levels_json, v.updated_at AS valuation_updated_at,
       u.is_favorite, u.note
     FROM companies c
@@ -647,7 +659,7 @@ function valuationRowSql(): string {
 }
 
 function toValuationRow(row: ValuationJoined): ValuationRow {
-  const metrics = completeMetrics(parseJson<Partial<Record<ValuationMetricKey, ValuationMetricStats>>>(row.metrics_json, {}));
+  const metrics = completeMetrics(parseJson<Partial<Record<ValuationMetricKey, ValuationMetricStats>>>(row.metrics_json, {}), row);
   return {
     companyKey: row.company_key,
     ticker: row.ticker,
@@ -664,20 +676,35 @@ function toValuationRow(row: ValuationJoined): ValuationRow {
     fcfYield: metrics.fcfYield,
     isFavorite: Boolean(row.is_favorite),
     note: row.note ?? "",
-    valuationUpdatedAt: row.valuation_updated_at
+    valuationUpdatedAt: row.valuation_updated_at ?? row.market_updated_at
   };
 }
 
-function completeMetrics(input: Partial<Record<ValuationMetricKey, ValuationMetricStats>>): Record<ValuationMetricKey, ValuationMetricStats> {
-  return Object.fromEntries(VALUATION_RATIOS.map((config) => [config.key, input[config.key] ?? emptyMetric(config)])) as Record<ValuationMetricKey, ValuationMetricStats>;
+function completeMetrics(input: Partial<Record<ValuationMetricKey, ValuationMetricStats>>, row: ValuationJoined): Record<ValuationMetricKey, ValuationMetricStats> {
+  return Object.fromEntries(VALUATION_RATIOS.map((config) => [config.key, input[config.key] ?? emptyMetric(config, currentMetricFallback(row, config.key))])) as Record<ValuationMetricKey, ValuationMetricStats>;
 }
 
-function emptyMetric(config: (typeof VALUATION_RATIOS)[number]): ValuationMetricStats {
+function currentMetricFallback(row: ValuationJoined, key: ValuationMetricKey): number | null {
+  switch (key) {
+    case "pe":
+      return numberOrNull(row.current_pe);
+    case "evSales":
+      return numberOrNull(row.current_ev_sales);
+    case "evEbitda":
+      return numberOrNull(row.current_ev_ebitda);
+    case "priceSales":
+      return numberOrNull(row.current_price_sales);
+    case "fcfYield":
+      return numberOrNull(row.current_fcf_yield);
+  }
+}
+
+function emptyMetric(config: (typeof VALUATION_RATIOS)[number], current: number | null = null): ValuationMetricStats {
   return {
     key: config.key,
     label: config.label,
     ratioId: config.ratioId,
-    current: null,
+    current,
     mean: null,
     stdDev: null,
     zScore: null,
