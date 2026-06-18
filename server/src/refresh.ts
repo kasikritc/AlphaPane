@@ -105,43 +105,32 @@ export async function refreshBatch(db: DatabaseSync, options: RefreshBatchOption
 }
 
 async function refreshCompanyPrices(db: DatabaseSync, companyKey: string, client: FiscalClient, logger: RefreshLogger): Promise<void> {
-  const ratios = await loggedFiscalCall(logger, "market", "companyRatios", { periodType: "latest" }, () => client.companyRatios(companyKey, "latest"), summarizeRatiosPayload);
+  // Fetch every independent series concurrently. stockPrices is fetched once and shared between
+  // the valuation snapshot and the daily-EV history (previously it was downloaded twice).
+  const [ratios, prices, valuationSeries, tevSeries] = await Promise.all([
+    loggedFiscalCall(logger, "market", "companyRatios", { periodType: "latest" }, () => client.companyRatios(companyKey, "latest"), summarizeRatiosPayload),
+    loggedFiscalCall(logger, "valuation", "stockPrices", {}, () => client.stockPrices(companyKey), summarizeSeriesPayload),
+    Promise.all(VALUATION_RATIOS.map(async (config) => {
+      const series = await loggedFiscalCall(logger, "valuation", "dailyRatio", { ratioId: config.ratioId, metric: config.key }, () => client.dailyRatio(companyKey, config.ratioId), summarizeSeriesPayload);
+      return [config.key, series] as const;
+    })),
+    // Daily EV history is best-effort; a failure here must not break the price refresh.
+    loggedFiscalCall(logger, "dailyEv", "dailyRatio", { ratioId: "calculated_tev" }, () => client.dailyRatio(companyKey, "calculated_tev"), summarizeSeriesPayload)
+      .catch((error) => {
+        logger.log({ level: "warning", phase: "dailyEv", operation: "bestEffort", message: `Daily EV history skipped: ${errorMessage(error)}`, data: errorDiagnostic(error) });
+        return null;
+      })
+  ]);
+
   const latest = selectLatestRatioRow(ratios);
   upsertMarketSnapshot(db, companyKey, latest);
   logger.log({ level: "success", phase: "market", operation: "upsertMarketSnapshot", message: "Cached latest market ratios.", data: { latestReportDate: latest?.reportDate ?? null, metrics: Object.keys(latest?.metricValues ?? {}) } });
-  await refreshValuationSnapshot(db, companyKey, client, logger);
-  await refreshDailyEvHistory(db, companyKey, client, logger);
-}
 
-async function refreshCompanyFinancials(db: DatabaseSync, companyKey: string, client: FiscalClient, logger: RefreshLogger): Promise<void> {
-  const profile = await loggedFiscalCall(logger, "financials", "companyProfile", {}, () => client.companyProfile(companyKey), (payload) => ({ name: payload.name, sector: payload.sector, reportingTemplate: payload.reportingTemplate }));
-  const ratios = await loggedFiscalCall(logger, "financials", "companyRatios", { periodType: "latest,annual" }, () => client.companyRatios(companyKey, "latest,annual"), summarizeRatiosPayload);
-  const income = await loggedFiscalCall(logger, "financials", "standardizedFinancials", { statementType: "income-statement", periodType: "ltm,annual" }, () => client.standardizedFinancials(companyKey, "income-statement", "ltm,annual"), summarizeFinancialPayload);
-  const cashFlow = await loggedFiscalCall(logger, "financials", "standardizedFinancials", { statementType: "cash-flow-statement", periodType: "ltm,annual" }, () => client.standardizedFinancials(companyKey, "cash-flow-statement", "ltm,annual"), summarizeFinancialPayload);
-  const balanceSheet = await loggedFiscalCall(logger, "financials", "standardizedFinancials", { statementType: "balance-sheet", periodType: "quarterly,annual" }, () => client.standardizedFinancials(companyKey, "balance-sheet", "quarterly,annual"), summarizeFinancialPayload);
-
-  upsertCompanyProfile(db, { ...profile, companyKey });
-  upsertMarketSnapshot(db, companyKey, selectLatestRatioRow(ratios));
-  upsertFinancialSnapshot(db, companyKey, deriveFinancialSnapshot(profile, ratios, income, cashFlow, balanceSheet));
-  logger.log({ level: "success", phase: "financials", operation: "upsertFinancialSnapshot", message: "Cached company profile, market ratios, and derived financial snapshot.", data: { profileName: profile.name ?? null } });
-}
-
-async function refreshValuationSnapshot(db: DatabaseSync, companyKey: string, client: FiscalClient, logger: RefreshLogger): Promise<void> {
-  const ratioEntries: Array<readonly [string, Array<Record<string, unknown>>]> = [];
-  for (const config of VALUATION_RATIOS) {
-    const series = await loggedFiscalCall(logger, "valuation", "dailyRatio", { ratioId: config.ratioId, metric: config.key }, () => client.dailyRatio(companyKey, config.ratioId), summarizeSeriesPayload);
-    ratioEntries.push([config.key, series] as const);
-  }
-  const ratiosByKey = Object.fromEntries(ratioEntries) as any;
-  const prices = await loggedFiscalCall(logger, "valuation", "stockPrices", {}, () => client.stockPrices(companyKey), summarizeSeriesPayload);
+  const ratiosByKey = Object.fromEntries(valuationSeries) as any;
   upsertValuationSnapshot(db, companyKey, buildValuationSnapshot(ratiosByKey, prices));
-  logger.log({ level: "success", phase: "valuation", operation: "upsertValuationSnapshot", message: "Cached valuation ratio history and P/E band inputs.", data: { ratioSeries: ratioEntries.map(([key, values]) => ({ key, observations: values.length })), prices: prices.length } });
-}
+  logger.log({ level: "success", phase: "valuation", operation: "upsertValuationSnapshot", message: "Cached valuation ratio history and P/E band inputs.", data: { ratioSeries: valuationSeries.map(([key, values]) => ({ key, observations: values.length })), prices: prices.length } });
 
-async function refreshDailyEvHistory(db: DatabaseSync, companyKey: string, client: FiscalClient, logger: RefreshLogger): Promise<void> {
-  try {
-    const tevSeries = await loggedFiscalCall(logger, "dailyEv", "dailyRatio", { ratioId: "calculated_tev" }, () => client.dailyRatio(companyKey, "calculated_tev"), summarizeSeriesPayload);
-    const prices = await loggedFiscalCall(logger, "dailyEv", "stockPrices", {}, () => client.stockPrices(companyKey), summarizeSeriesPayload);
+  if (tevSeries) {
     const evPoints = (Array.isArray(tevSeries) ? tevSeries : [])
       .map((row: any) => ({
         date: String(row.date ?? "").slice(0, 10),
@@ -154,10 +143,23 @@ async function refreshDailyEvHistory(db: DatabaseSync, companyKey: string, clien
     }));
     upsertDailyEvHistory(db, companyKey, evPoints, pricePoints);
     logger.log({ level: "success", phase: "dailyEv", operation: "upsertDailyEvHistory", message: "Cached daily EV and price history.", data: { evPoints: evPoints.length, pricePoints: pricePoints.length } });
-  } catch (error) {
-    logger.log({ level: "warning", phase: "dailyEv", operation: "bestEffort", message: `Daily EV history skipped: ${errorMessage(error)}`, data: errorDiagnostic(error) });
-    // Daily EV history is best-effort; failures should not break price refresh.
   }
+}
+
+async function refreshCompanyFinancials(db: DatabaseSync, companyKey: string, client: FiscalClient, logger: RefreshLogger): Promise<void> {
+  // All five statement/ratio fetches are independent, so issue them concurrently.
+  const [profile, ratios, income, cashFlow, balanceSheet] = await Promise.all([
+    loggedFiscalCall(logger, "financials", "companyProfile", {}, () => client.companyProfile(companyKey), (payload) => ({ name: payload.name, sector: payload.sector, reportingTemplate: payload.reportingTemplate })),
+    loggedFiscalCall(logger, "financials", "companyRatios", { periodType: "latest,annual" }, () => client.companyRatios(companyKey, "latest,annual"), summarizeRatiosPayload),
+    loggedFiscalCall(logger, "financials", "standardizedFinancials", { statementType: "income-statement", periodType: "ltm,annual" }, () => client.standardizedFinancials(companyKey, "income-statement", "ltm,annual"), summarizeFinancialPayload),
+    loggedFiscalCall(logger, "financials", "standardizedFinancials", { statementType: "cash-flow-statement", periodType: "ltm,annual" }, () => client.standardizedFinancials(companyKey, "cash-flow-statement", "ltm,annual"), summarizeFinancialPayload),
+    loggedFiscalCall(logger, "financials", "standardizedFinancials", { statementType: "balance-sheet", periodType: "quarterly,annual" }, () => client.standardizedFinancials(companyKey, "balance-sheet", "quarterly,annual"), summarizeFinancialPayload)
+  ]);
+
+  upsertCompanyProfile(db, { ...profile, companyKey });
+  upsertMarketSnapshot(db, companyKey, selectLatestRatioRow(ratios));
+  upsertFinancialSnapshot(db, companyKey, deriveFinancialSnapshot(profile, ratios, income, cashFlow, balanceSheet));
+  logger.log({ level: "success", phase: "financials", operation: "upsertFinancialSnapshot", message: "Cached company profile, market ratios, and derived financial snapshot.", data: { profileName: profile.name ?? null } });
 }
 
 function resolveRefreshCompanyKeys(db: DatabaseSync, requested: string[] | undefined, kind: RefreshKind, order: RefreshOrder): string[] {
