@@ -1,5 +1,128 @@
-import { describe, expect, it } from "vitest";
-import { buildEvBridge, buildFinancialBases } from "./refresh.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { TRIAL_COMPANIES } from "@alphapane/shared";
+import { openDatabase } from "./db.js";
+import { buildEvBridge, buildFinancialBases, refreshBatch } from "./refresh.js";
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Mock Fiscal client that records dedup/concurrency behavior. companyKey is always the first arg. */
+function makeTrackingClient(options: { failKey?: string } = {}) {
+  const liveCalls = new Map<string, number>();
+  const stockPriceCalls = new Map<string, number>();
+  const attempted = new Set<string>();
+  let activeCompanies = 0;
+  let maxConcurrentCompanies = 0;
+
+  async function track<T>(companyKey: string, value: T): Promise<T> {
+    attempted.add(companyKey);
+    const live = liveCalls.get(companyKey) ?? 0;
+    if (live === 0) {
+      activeCompanies += 1;
+      maxConcurrentCompanies = Math.max(maxConcurrentCompanies, activeCompanies);
+    }
+    liveCalls.set(companyKey, live + 1);
+    try {
+      await delay(5);
+      if (options.failKey && companyKey === options.failKey) throw new Error(`forced failure for ${companyKey}`);
+      return value;
+    } finally {
+      const remaining = (liveCalls.get(companyKey) ?? 1) - 1;
+      liveCalls.set(companyKey, remaining);
+      if (remaining === 0) activeCompanies -= 1;
+    }
+  }
+
+  const client = {
+    async companyProfile(companyKey: string) {
+      return track(companyKey, { name: "Bench Co", sector: "Technology", reportingTemplate: "standard" });
+    },
+    async companyRatios(companyKey: string) {
+      return track(companyKey, { data: [{ periodType: "Latest", reportDate: "2024-12-31", metricValues: {} }] });
+    },
+    async standardizedFinancials(companyKey: string) {
+      return track(companyKey, { data: [] });
+    },
+    async dailyRatio(companyKey: string) {
+      return track(companyKey, [] as Array<Record<string, unknown>>);
+    },
+    async stockPrices(companyKey: string) {
+      stockPriceCalls.set(companyKey, (stockPriceCalls.get(companyKey) ?? 0) + 1);
+      return track(companyKey, [] as any[]);
+    }
+  };
+
+  return {
+    client: client as any,
+    stockPriceCalls,
+    attempted,
+    maxConcurrentCompanies: () => maxConcurrentCompanies
+  };
+}
+
+describe("refreshBatch concurrency pool", () => {
+  let dbPath: string;
+  let db: ReturnType<typeof openDatabase>;
+  const priorConcurrency = process.env.REFRESH_CONCURRENCY;
+
+  beforeEach(() => {
+    dbPath = path.join(os.tmpdir(), `alphapane-test-${process.pid}-${Math.random().toString(36).slice(2)}.db`);
+    db = openDatabase(dbPath);
+  });
+
+  afterEach(() => {
+    db.close();
+    if (priorConcurrency === undefined) delete process.env.REFRESH_CONCURRENCY;
+    else process.env.REFRESH_CONCURRENCY = priorConcurrency;
+    for (const suffix of ["", "-wal", "-shm"]) {
+      try {
+        fs.rmSync(`${dbPath}${suffix}`);
+      } catch {
+        /* best effort */
+      }
+    }
+  });
+
+  it("fetches stock prices once per company during a prices refresh", async () => {
+    process.env.REFRESH_CONCURRENCY = "3";
+    const tracker = makeTrackingClient();
+    const companyKeys = [...TRIAL_COMPANIES].slice(0, 6);
+
+    const result = await refreshBatch(db, { kind: "prices", companyKeys, order: "given", continueOnError: true }, tracker.client);
+
+    expect(result.status).toBe("success");
+    for (const companyKey of companyKeys) {
+      expect(tracker.stockPriceCalls.get(companyKey)).toBe(1);
+    }
+  });
+
+  it("never runs more companies in parallel than the configured concurrency", async () => {
+    process.env.REFRESH_CONCURRENCY = "3";
+    const tracker = makeTrackingClient();
+    const companyKeys = [...TRIAL_COMPANIES].slice(0, 8);
+
+    await refreshBatch(db, { kind: "prices", companyKeys, order: "given", continueOnError: true }, tracker.client);
+
+    expect(tracker.maxConcurrentCompanies()).toBeLessThanOrEqual(3);
+    expect(tracker.maxConcurrentCompanies()).toBeGreaterThan(1);
+  });
+
+  it("stops scheduling new companies after a failure when continueOnError is false", async () => {
+    process.env.REFRESH_CONCURRENCY = "1";
+    const companyKeys = [...TRIAL_COMPANIES].slice(0, 4);
+    const tracker = makeTrackingClient({ failKey: companyKeys[0] });
+
+    const result = await refreshBatch(db, { kind: "prices", companyKeys, order: "given", continueOnError: false }, tracker.client);
+
+    expect(result.status).not.toBe("success");
+    expect(tracker.attempted.size).toBe(1);
+    expect(tracker.attempted.has(companyKeys[0])).toBe(true);
+  });
+});
 
 describe("financial base derivation", () => {
   it("builds LTM and annual revenue and FCF bases", () => {
