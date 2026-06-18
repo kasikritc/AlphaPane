@@ -1,6 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { BasePeriod, EvBridge, ExitMetric, ExitMultipleStat, FinancialBase, RefreshKind, RefreshLogLevel, RefreshOrder, RefreshStatus } from "@alphapane/shared";
 import { TRIAL_COMPANIES } from "@alphapane/shared";
+import { getConfig } from "./config.js";
 import { FiscalClient } from "./fiscalClient.js";
 import { cagr, defaultDiscountRate, median, normalizeTerminalGrowth } from "./math.js";
 import {
@@ -65,16 +66,24 @@ export async function refreshBatch(db: DatabaseSync, options: RefreshBatchOption
   const runLogger = makeRefreshLogger(db, runId, null, null);
   const itemIds = companyKeys.map((companyKey, index) => createRefreshRunItem(db, runId, companyKey, index + 1));
   const failures: Array<{ companyKey: string; message: string }> = [];
+  const concurrency = Math.max(1, Math.min(getConfig().refreshConcurrency, companyKeys.length || 1));
 
   runLogger.log({
     level: "info",
     phase: "run",
     operation: "refreshBatch",
     message: `Starting ${options.kind} refresh for ${companyKeys.length} companies.`,
-    data: { kind: options.kind, order, companyKeys, continueOnError: options.continueOnError ?? true }
+    data: { kind: options.kind, order, companyKeys, concurrency, continueOnError: options.continueOnError ?? true }
   });
 
-  for (const [index, companyKey] of companyKeys.entries()) {
+  // Companies are refreshed by a bounded pool of workers. Network fetches run concurrently across
+  // companies; the synchronous SQLite writes inside each company naturally serialize on the single
+  // DatabaseSync connection, so no locking is required.
+  let nextIndex = 0;
+  let aborted = false;
+
+  const processCompany = async (index: number): Promise<void> => {
+    const companyKey = companyKeys[index];
     const itemId = itemIds[index];
     const logger = makeRefreshLogger(db, runId, itemId, companyKey);
     updateRefreshRunItem(db, itemId, "running");
@@ -90,9 +99,20 @@ export async function refreshBatch(db: DatabaseSync, options: RefreshBatchOption
       failures.push({ companyKey, message });
       updateRefreshRunItem(db, itemId, "failed", message);
       logger.log({ level: "error", phase: "company", operation: "finish", message: `Failed ${companyKey}: ${message}`, data: errorDiagnostic(error) });
-      if (options.continueOnError === false) break;
+      // When continueOnError is false, stop scheduling new companies; already in-flight ones finish.
+      if (options.continueOnError === false) aborted = true;
     }
-  }
+  };
+
+  const worker = async (): Promise<void> => {
+    while (!aborted) {
+      const index = nextIndex++;
+      if (index >= companyKeys.length) return;
+      await processCompany(index);
+    }
+  };
+
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
 
   const successCount = companyKeys.length - failures.length;
   const status: RefreshStatus = failures.length === 0 ? "success" : successCount > 0 ? "partial" : "failed";
