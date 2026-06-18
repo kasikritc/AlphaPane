@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { AssumptionSet, AssumptionSources, BasePeriod, ColumnPreference, CompanyDetail, CompanyRow, DailyEvPoint, EvBridge, ExitMetric, ExitMultipleStat, FinancialBase, ImpliedGrowthHistoryData, ModelCell, ModelDiagnostics, RealizedGrowthPoint, RefreshRun, SensitivityTable, TerminalMethod, ValuationDetail, ValuationHistoryPoint, ValuationMetricKey, ValuationMetricStats, ValuationRow } from "@alphapane/shared";
+import type { AssumptionSet, AssumptionSources, BasePeriod, ColumnPreference, CompanyDetail, CompanyRow, DailyEvPoint, EvBridge, ExitMetric, ExitMultipleStat, FinancialBase, ImpliedGrowthHistoryData, ModelCell, ModelDiagnostics, RealizedGrowthPoint, RefreshItemStatus, RefreshJobItem, RefreshKind, RefreshLogEntry, RefreshLogLevel, RefreshOrder, RefreshRun, RefreshRunDetail, RefreshStatus, SensitivityTable, TerminalMethod, ValuationDetail, ValuationHistoryPoint, ValuationMetricKey, ValuationMetricStats, ValuationRow } from "@alphapane/shared";
 import { TRIAL_COMPANIES, computeRealizedGrowth } from "@alphapane/shared";
 import { buildModel, buildSensitivity, median } from "./math.js";
 import { VALUATION_RATIOS } from "./valuation.js";
@@ -274,27 +274,175 @@ export function saveColumnPreferences(db: DatabaseSync, preferences: ColumnPrefe
   `).run(key, JSON.stringify(preferences), now());
 }
 
-export function createRefreshRun(db: DatabaseSync, kind: "prices" | "financials"): number {
+export function createRefreshRun(db: DatabaseSync, kind: RefreshKind, options: { companyCount?: number; order?: RefreshOrder | null } = {}): number {
   const result = db
-    .prepare("INSERT INTO refresh_runs (kind, status, started_at) VALUES (?, 'running', ?)")
-    .run(kind, now());
+    .prepare("INSERT INTO refresh_runs (kind, status, started_at, company_count, refresh_order) VALUES (?, 'running', ?, ?, ?)")
+    .run(kind, now(), options.companyCount ?? 0, options.order ?? null);
   return Number(result.lastInsertRowid);
 }
 
-export function finishRefreshRun(db: DatabaseSync, id: number, status: "success" | "failed", message: string | null): void {
-  db.prepare("UPDATE refresh_runs SET status = ?, finished_at = ?, message = ? WHERE id = ?").run(status, now(), message, id);
+export function finishRefreshRun(db: DatabaseSync, id: number, status: RefreshStatus, message: string | null): void {
+  const counts = db.prepare(`
+    SELECT
+      COUNT(*) AS company_count,
+      SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,
+      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failure_count
+    FROM refresh_run_items
+    WHERE refresh_run_id = ?
+  `).get(id) as { company_count?: number; success_count?: number | null; failure_count?: number | null } | undefined;
+  db.prepare(`
+    UPDATE refresh_runs SET
+      status = ?,
+      finished_at = ?,
+      message = ?,
+      company_count = COALESCE(?, company_count),
+      success_count = ?,
+      failure_count = ?
+    WHERE id = ?
+  `).run(
+    status,
+    now(),
+    message,
+    counts?.company_count ?? null,
+    counts?.success_count ?? 0,
+    counts?.failure_count ?? 0,
+    id
+  );
 }
 
 export function getRefreshRuns(db: DatabaseSync): RefreshRun[] {
   const rows = db.prepare("SELECT * FROM refresh_runs ORDER BY id DESC LIMIT 20").all() as Array<Record<string, unknown>>;
+  return rows.map(toRefreshRun);
+}
+
+export function createRefreshRunItem(db: DatabaseSync, refreshRunId: number, companyKey: string, sequence: number): number {
+  const result = db.prepare(`
+    INSERT INTO refresh_run_items (refresh_run_id, company_key, sequence, status)
+    VALUES (?, ?, ?, 'waiting')
+  `).run(refreshRunId, companyKey, sequence);
+  return Number(result.lastInsertRowid);
+}
+
+export function updateRefreshRunItem(
+  db: DatabaseSync,
+  itemId: number,
+  status: RefreshItemStatus,
+  message: string | null = null
+): void {
+  const startedAt = status === "running" ? now() : null;
+  const finishedAt = status === "success" || status === "failed" || status === "skipped" ? now() : null;
+  db.prepare(`
+    UPDATE refresh_run_items SET
+      status = ?,
+      started_at = COALESCE(?, started_at),
+      finished_at = COALESCE(?, finished_at),
+      message = COALESCE(?, message)
+    WHERE id = ?
+  `).run(status, startedAt, finishedAt, message, itemId);
+}
+
+export function appendRefreshLog(db: DatabaseSync, input: {
+  refreshRunId: number;
+  itemId?: number | null;
+  companyKey?: string | null;
+  level: RefreshLogLevel;
+  phase: string;
+  operation: string;
+  message: string;
+  data?: Record<string, unknown> | null;
+  durationMs?: number | null;
+}): void {
+  const row = db.prepare("SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM refresh_run_logs WHERE refresh_run_id = ?").get(input.refreshRunId) as { sequence: number };
+  db.prepare(`
+    INSERT INTO refresh_run_logs (
+      refresh_run_id, item_id, company_key, sequence, level, phase, operation,
+      message, data_json, duration_ms, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    input.refreshRunId,
+    input.itemId ?? null,
+    input.companyKey ?? null,
+    row.sequence,
+    input.level,
+    input.phase,
+    input.operation,
+    input.message,
+    input.data ? JSON.stringify(input.data) : null,
+    input.durationMs ?? null,
+    now()
+  );
+}
+
+export function getRefreshRunDetail(db: DatabaseSync, id: number): RefreshRunDetail | null {
+  const runRow = db.prepare("SELECT * FROM refresh_runs WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+  if (!runRow) return null;
+  return {
+    run: toRefreshRun(runRow),
+    items: getRefreshRunItems(db, id),
+    logs: getRefreshRunLogs(db, id)
+  };
+}
+
+export function getRefreshRunItems(db: DatabaseSync, refreshRunId: number): RefreshJobItem[] {
+  const rows = db.prepare(`
+    SELECT i.*, c.ticker, c.name
+    FROM refresh_run_items i
+    JOIN companies c ON c.company_key = i.company_key
+    WHERE i.refresh_run_id = ?
+    ORDER BY i.sequence ASC
+  `).all(refreshRunId) as Array<Record<string, unknown>>;
   return rows.map((row) => ({
     id: Number(row.id),
-    kind: row.kind as RefreshRun["kind"],
-    status: row.status as RefreshRun["status"],
+    refreshRunId: Number(row.refresh_run_id),
+    companyKey: String(row.company_key),
+    ticker: String(row.ticker),
+    name: String(row.name),
+    sequence: Number(row.sequence),
+    status: row.status as RefreshItemStatus,
+    startedAt: nullableString(row.started_at),
+    finishedAt: nullableString(row.finished_at),
+    message: nullableString(row.message)
+  }));
+}
+
+export function getRefreshRunLogs(db: DatabaseSync, refreshRunId: number): RefreshLogEntry[] {
+  const rows = db.prepare(`
+    SELECT l.*, c.ticker
+    FROM refresh_run_logs l
+    LEFT JOIN companies c ON c.company_key = l.company_key
+    WHERE l.refresh_run_id = ?
+    ORDER BY l.sequence ASC
+  `).all(refreshRunId) as Array<Record<string, unknown>>;
+  return rows.map((row) => ({
+    id: Number(row.id),
+    refreshRunId: Number(row.refresh_run_id),
+    itemId: numberOrNull(row.item_id),
+    companyKey: nullableString(row.company_key),
+    ticker: nullableString(row.ticker),
+    sequence: Number(row.sequence),
+    level: row.level as RefreshLogLevel,
+    phase: String(row.phase),
+    operation: String(row.operation),
+    message: String(row.message),
+    data: parseJson<Record<string, unknown> | null>(stringOrUndefined(row.data_json), null),
+    durationMs: numberOrNull(row.duration_ms),
+    createdAt: String(row.created_at)
+  }));
+}
+
+function toRefreshRun(row: Record<string, unknown>): RefreshRun {
+  return {
+    id: Number(row.id),
+    kind: row.kind as RefreshKind,
+    status: row.status as RefreshStatus,
     startedAt: String(row.started_at),
     finishedAt: row.finished_at ? String(row.finished_at) : null,
-    message: row.message ? String(row.message) : null
-  }));
+    message: row.message ? String(row.message) : null,
+    companyCount: Number(row.company_count ?? 0),
+    successCount: Number(row.success_count ?? 0),
+    failureCount: Number(row.failure_count ?? 0),
+    order: row.refresh_order ? row.refresh_order as RefreshOrder : null
+  };
 }
 
 export function upsertCompanyProfile(db: DatabaseSync, profile: Record<string, unknown>): void {

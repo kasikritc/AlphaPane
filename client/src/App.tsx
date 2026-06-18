@@ -4,20 +4,25 @@ import {
   Activity,
   ArrowDownUp,
   BadgeCheck,
+  CheckSquare,
   ChevronDown,
   ChevronsLeft,
   ChevronsRight,
+  ClipboardList,
   Columns3,
   DatabaseZap,
   FileText,
   Gauge,
+  ListFilter,
   LineChart,
   Maximize2,
   Minimize2,
+  Play,
   RefreshCw,
   Search,
   Settings2,
   ShieldCheck,
+  Square,
   Star
 } from "lucide-react";
 import type {
@@ -32,6 +37,9 @@ import type {
   ModelDiagnostics,
   RealizedGrowthPoint,
   RefreshRun,
+  RefreshKind,
+  RefreshOrder,
+  RefreshRunDetail,
   SensitivityTable,
   TerminalMethod,
   ValuationDetail,
@@ -54,6 +62,18 @@ interface RefreshPayload {
   rows: CompanyRow[];
   valuationRows?: ValuationRow[];
   runs: RefreshRun[];
+}
+
+interface RefreshBatchPayload extends RefreshPayload {
+  result: { runId: number; status: RefreshRun["status"]; message: string };
+  detail: RefreshRunDetail | null;
+}
+
+interface RefreshBatchRequest {
+  companyKeys: string[];
+  kind: RefreshKind;
+  order: RefreshOrder;
+  continueOnError: boolean;
 }
 
 interface TableColumn<Row extends BaseRow> {
@@ -145,6 +165,8 @@ export function App() {
   const [valuationRows, setValuationRows] = useState<ValuationRow[]>([]);
   const [preferences, setPreferences] = useState<ColumnPreference[]>([]);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [selectedCompanyKeys, setSelectedCompanyKeys] = useState<Set<string>>(() => new Set());
+  const [lastSelectionKey, setLastSelectionKey] = useState<string | null>(null);
   const [detail, setDetail] = useState<CompanyDetail | null>(null);
   const [valuationDetail, setValuationDetail] = useState<ValuationDetail | null>(null);
   const [runs, setRuns] = useState<RefreshRun[]>([]);
@@ -154,6 +176,9 @@ export function App() {
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
   const [workbenchSection, setWorkbenchSection] = useState<WorkbenchSection>("signal");
   const [companyPanelMode, setCompanyPanelMode] = useState<CompanyPanelMode>(() => readStoredCompanyPanelMode());
+  const [refreshPlannerOpen, setRefreshPlannerOpen] = useState(false);
+  const [batchRefreshing, setBatchRefreshing] = useState(false);
+  const [latestRefreshDetail, setLatestRefreshDetail] = useState<RefreshRunDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState<string | null>(null);
   const [refreshStatus, setRefreshStatus] = useState<string | null>(null);
@@ -195,6 +220,7 @@ export function App() {
       setPreferences(reversePayload.columns);
       setValuationRows(valuationPayload.rows);
       setRuns(refreshPayload.runs);
+      await loadLatestRefreshDetail(refreshPayload.runs);
     } catch (apiError) {
       setError(errorMessage(apiError));
     } finally {
@@ -240,11 +266,52 @@ export function App() {
         applyRefreshPayload(await api<RefreshPayload>(`/api/refresh/${kind}`, { method: "POST" }));
       }
       if (selectedKey) await loadSelectedCompany(selectedKey);
+      const latestRuns = await api<{ runs: RefreshRun[] }>("/api/refresh-runs");
+      setRuns(latestRuns.runs);
+      await loadLatestRefreshDetail(latestRuns.runs);
     } catch (apiError) {
       setError(errorMessage(apiError));
       const refreshPayload = await api<{ runs: RefreshRun[] }>("/api/refresh-runs");
       setRuns(refreshPayload.runs);
     } finally {
+      setRefreshing(null);
+      setRefreshStatus(null);
+    }
+  }
+
+  async function loadLatestRefreshDetail(refreshRuns: RefreshRun[]) {
+    const latestRun = refreshRuns[0];
+    if (!latestRun) {
+      setLatestRefreshDetail(null);
+      return;
+    }
+    try {
+      setLatestRefreshDetail(await api<RefreshRunDetail>(`/api/refresh-runs/${latestRun.id}`));
+    } catch {
+      setLatestRefreshDetail(null);
+    }
+  }
+
+  async function runBatchRefresh(request: RefreshBatchRequest) {
+    setBatchRefreshing(true);
+    setRefreshing("batch");
+    setRefreshStatus(`Refreshing ${request.companyKeys.length} selected companies`);
+    setError(null);
+    try {
+      const payload = await api<RefreshBatchPayload>("/api/refresh/batch", {
+        method: "POST",
+        body: JSON.stringify(request)
+      });
+      applyRefreshPayload(payload);
+      setLatestRefreshDetail(payload.detail);
+      if (selectedKey) await loadSelectedCompany(selectedKey);
+      if (payload.result.status === "failed") setError(payload.result.message);
+    } catch (apiError) {
+      setError(errorMessage(apiError));
+      const refreshPayload = await api<{ runs: RefreshRun[] }>("/api/refresh-runs");
+      setRuns(refreshPayload.runs);
+    } finally {
+      setBatchRefreshing(false);
       setRefreshing(null);
       setRefreshStatus(null);
     }
@@ -267,6 +334,40 @@ export function App() {
   const weakTrustCount = opportunities.filter((row) => row.trustScore < 0.65).length;
   const selectedOpportunity = opportunities.find((row) => row.companyKey === selectedKey) ?? null;
   const table = useTable(opportunities, opportunityColumns, preferences, query, favoritesOnly, sortKey, sortDirection);
+  const selectedRows = useMemo(() => opportunities.filter((row) => selectedCompanyKeys.has(row.companyKey)), [opportunities, selectedCompanyKeys]);
+  const allVisibleSelected = table.filteredRows.length > 0 && table.filteredRows.every((row) => selectedCompanyKeys.has(row.companyKey));
+
+  function toggleCompanySelection(companyKey: string, shiftKey = false) {
+    const visibleKeys = table.filteredRows.map((row) => row.companyKey);
+    setSelectedCompanyKeys((current) => {
+      const next = new Set(current);
+      if (shiftKey && lastSelectionKey) {
+        const start = visibleKeys.indexOf(lastSelectionKey);
+        const end = visibleKeys.indexOf(companyKey);
+        if (start >= 0 && end >= 0) {
+          const [from, to] = start < end ? [start, end] : [end, start];
+          for (const key of visibleKeys.slice(from, to + 1)) next.add(key);
+          return next;
+        }
+      }
+      if (next.has(companyKey)) next.delete(companyKey);
+      else next.add(companyKey);
+      return next;
+    });
+    setLastSelectionKey(companyKey);
+  }
+
+  function toggleVisibleSelection() {
+    setSelectedCompanyKeys((current) => {
+      const next = new Set(current);
+      if (allVisibleSelected) {
+        for (const row of table.filteredRows) next.delete(row.companyKey);
+      } else {
+        for (const row of table.filteredRows) next.add(row.companyKey);
+      }
+      return next;
+    });
+  }
 
   return (
     <div className="shell cockpit-shell">
@@ -323,11 +424,24 @@ export function App() {
             <span><i className="dcf-dot" /> Reverse DCF is the judgment lens</span>
             <span><i className="confirmed-dot" /> Agreement is the strongest signal</span>
           </div>
+          {selectedRows.length > 0 && (
+            <SelectionCommandBar
+              selectedRows={selectedRows}
+              visibleCount={table.filteredRows.length}
+              allVisibleSelected={allVisibleSelected}
+              onSelectVisible={toggleVisibleSelection}
+              onRefresh={() => setRefreshPlannerOpen(true)}
+              onClear={() => setSelectedCompanyKeys(new Set())}
+            />
+          )}
+          {latestRefreshDetail && <RefreshLedger detail={latestRefreshDetail} />}
           <DataTable<OpportunityRow>
             rows={table.filteredRows}
             columns={table.visibleColumns}
             loading={loading}
             selectedKey={selectedKey}
+            selectedCompanyKeys={selectedCompanyKeys}
+            allVisibleSelected={allVisibleSelected}
             sortKey={sortKey}
             sortDirection={sortDirection}
             onSort={(key) => {
@@ -339,6 +453,8 @@ export function App() {
               }
             }}
             onSelect={setSelectedKey}
+            onToggleRowSelection={toggleCompanySelection}
+            onToggleVisibleSelection={toggleVisibleSelection}
           />
         </section>
 
@@ -364,6 +480,19 @@ export function App() {
           )}
         </aside>
       </main>
+      {refreshPlannerOpen && (
+        <RefreshPlanner
+          opportunities={opportunities}
+          selectedRows={selectedRows}
+          visibleRows={table.filteredRows}
+          running={batchRefreshing}
+          onClose={() => setRefreshPlannerOpen(false)}
+          onRun={async (request) => {
+            await runBatchRefresh(request);
+            setRefreshPlannerOpen(false);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -372,6 +501,214 @@ function readStoredCompanyPanelMode(): CompanyPanelMode {
   if (typeof window === "undefined") return "open";
   const stored = window.localStorage.getItem(companyPanelModeStorageKey);
   return stored === "rail" || stored === "fullscreen" || stored === "open" ? stored : "open";
+}
+
+function SelectionCommandBar({ selectedRows, visibleCount, allVisibleSelected, onSelectVisible, onRefresh, onClear }: {
+  selectedRows: OpportunityRow[];
+  visibleCount: number;
+  allVisibleSelected: boolean;
+  onSelectVisible: () => void;
+  onRefresh: () => void;
+  onClear: () => void;
+}) {
+  return (
+    <div className="selection-bar" aria-label="Selected company actions">
+      <div className="selection-summary">
+        <CheckSquare size={16} />
+        <strong>{selectedRows.length} selected</strong>
+        <span>{selectedRows.slice(0, 4).map((row) => row.ticker).join(" ")}{selectedRows.length > 4 ? ` +${selectedRows.length - 4}` : ""}</span>
+      </div>
+      <div className="selection-actions">
+        <button onClick={onSelectVisible}><ListFilter size={15} />{allVisibleSelected ? "Clear visible" : `Select visible (${visibleCount})`}</button>
+        <button className="primary-action compact-action" onClick={onRefresh}><RefreshCw size={15} />Refresh selected</button>
+        <button disabled title="Comparison will use the same multi-select set"><Columns3 size={15} />Compare</button>
+        <button onClick={onClear}>Clear</button>
+      </div>
+    </div>
+  );
+}
+
+function RefreshPlanner({ opportunities, selectedRows, visibleRows, running, onClose, onRun }: {
+  opportunities: OpportunityRow[];
+  selectedRows: OpportunityRow[];
+  visibleRows: OpportunityRow[];
+  running: boolean;
+  onClose: () => void;
+  onRun: (request: RefreshBatchRequest) => Promise<void>;
+}) {
+  const [scope, setScope] = useState<"selected" | "visible" | "custom">("selected");
+  const [kind, setKind] = useState<RefreshKind>("all");
+  const [order, setOrder] = useState<RefreshOrder>("oldest-first");
+  const [continueOnError, setContinueOnError] = useState(true);
+  const [customText, setCustomText] = useState("");
+  const resolved = useMemo(() => resolveRefreshPlannerRows(scope, selectedRows, visibleRows, opportunities, customText, kind, order), [scope, selectedRows, visibleRows, opportunities, customText, kind, order]);
+  const canRun = resolved.rows.length > 0 && !running;
+
+  return (
+    <div className="planner-backdrop" role="presentation">
+      <section className="refresh-planner" role="dialog" aria-modal="true" aria-label="Refresh plan">
+        <div className="planner-header">
+          <div>
+            <p className="eyebrow">Refresh plan</p>
+            <h2>Build an auditable Fiscal queue.</h2>
+          </div>
+          <button onClick={onClose}>Close</button>
+        </div>
+        <div className="planner-grid">
+          <fieldset>
+            <legend>Scope</legend>
+            <label><input type="radio" checked={scope === "selected"} onChange={() => setScope("selected")} /> Selected companies</label>
+            <label><input type="radio" checked={scope === "visible"} onChange={() => setScope("visible")} /> Current filtered rows</label>
+            <label><input type="radio" checked={scope === "custom"} onChange={() => setScope("custom")} /> Custom tickers</label>
+          </fieldset>
+          <fieldset>
+            <legend>Data</legend>
+            <label><input type="radio" checked={kind === "all"} onChange={() => setKind("all")} /> Market + financials</label>
+            <label><input type="radio" checked={kind === "prices"} onChange={() => setKind("prices")} /> Market only</label>
+            <label><input type="radio" checked={kind === "financials"} onChange={() => setKind("financials")} /> Financials only</label>
+          </fieldset>
+          <fieldset>
+            <legend>Order</legend>
+            <label><input type="radio" checked={order === "oldest-first"} onChange={() => setOrder("oldest-first")} /> Oldest data first</label>
+            <label><input type="radio" checked={order === "newest-first"} onChange={() => setOrder("newest-first")} /> Newest data first</label>
+            <label><input type="radio" checked={order === "given"} onChange={() => setOrder("given")} /> Selection order</label>
+          </fieldset>
+          <fieldset>
+            <legend>Failures</legend>
+            <label><input type="checkbox" checked={continueOnError} onChange={(event) => setContinueOnError(event.target.checked)} /> Continue after errors</label>
+          </fieldset>
+        </div>
+        {scope === "custom" && (
+          <label className="custom-ticker-input">Tickers or company keys
+            <textarea value={customText} onChange={(event) => setCustomText(event.target.value)} placeholder="MSFT, NVDA, NASDAQ_ASML" />
+          </label>
+        )}
+        {resolved.unknown.length > 0 && <div className="inline-warning">Not in the current universe: {resolved.unknown.join(", ")}</div>}
+        <div className="refresh-preview">
+          <div className="refresh-preview-header">
+            <div><ClipboardList size={16} /><strong>{resolved.rows.length} queued</strong><span>{formatKindLabel(kind)} · {formatOrderLabel(order)}</span></div>
+            <button className="primary-action compact-action" disabled={!canRun} onClick={() => void onRun({ companyKeys: resolved.rows.map((row) => row.companyKey), kind, order, continueOnError })}>
+              <Play size={15} />{running ? "Running" : "Run refresh"}
+            </button>
+          </div>
+          <div className="refresh-preview-table">
+            <table>
+              <thead><tr><th>#</th><th>Ticker</th><th>Company</th><th>Market</th><th>Financials</th><th>Refresh basis</th></tr></thead>
+              <tbody>
+                {resolved.rows.length === 0 ? <tr><td colSpan={6}>No companies match this scope.</td></tr> : resolved.rows.map((row, index) => (
+                  <tr key={row.companyKey}>
+                    <td>{String(index + 1).padStart(2, "0")}</td>
+                    <td><strong>{row.ticker}</strong></td>
+                    <td>{row.name}</td>
+                    <td>{dateShort(row.reverse.pricesUpdatedAt)}</td>
+                    <td>{dateShort(row.reverse.financialsUpdatedAt)}</td>
+                    <td>{dateShort(refreshFreshnessDate(row, kind))}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function RefreshLedger({ detail }: { detail: RefreshRunDetail }) {
+  const latestLogs = detail.logs.slice(-18);
+  return (
+    <section className={`refresh-ledger ${detail.run.status}`} aria-label="Latest refresh ledger">
+      <div className="refresh-ledger-header">
+        <div>
+          <p className="eyebrow">Refresh ledger</p>
+          <h3>{detail.run.message ?? `${formatKindLabel(detail.run.kind)} refresh`}</h3>
+        </div>
+        <span>{detail.run.successCount ?? 0} updated / {detail.run.failureCount ?? 0} failed</span>
+      </div>
+      <div className="ledger-items">
+        {detail.items.map((item) => <span key={item.id} className={`ledger-item ${item.status}`}><b>{String(item.sequence).padStart(2, "0")}</b>{item.ticker}<em>{item.status}</em></span>)}
+      </div>
+      <details className="ledger-log-detail">
+        <summary>Show Fiscal call log</summary>
+        <div className="ledger-log-list">
+          {latestLogs.map((log) => (
+            <div key={log.id} className={`ledger-log ${log.level}`}>
+              <span>{log.ticker ?? "run"}</span>
+              <strong>{log.phase} / {log.operation}</strong>
+              <p>{log.message}</p>
+              {log.data && <code>{JSON.stringify(log.data)}</code>}
+            </div>
+          ))}
+        </div>
+      </details>
+    </section>
+  );
+}
+
+function resolveRefreshPlannerRows(
+  scope: "selected" | "visible" | "custom",
+  selectedRows: OpportunityRow[],
+  visibleRows: OpportunityRow[],
+  allRows: OpportunityRow[],
+  customText: string,
+  kind: RefreshKind,
+  order: RefreshOrder
+): { rows: OpportunityRow[]; unknown: string[] } {
+  if (scope !== "custom") {
+    return { rows: sortRefreshRows(scope === "selected" ? selectedRows : visibleRows, kind, order), unknown: [] };
+  }
+  const byTicker = new Map(allRows.map((row) => [row.ticker.toUpperCase(), row]));
+  const byKey = new Map(allRows.map((row) => [row.companyKey.toUpperCase(), row]));
+  const tokens = customText.split(/[\s,;]+/).map((token) => token.trim().toUpperCase()).filter(Boolean);
+  const rows: OpportunityRow[] = [];
+  const unknown: string[] = [];
+  const seen = new Set<string>();
+  for (const token of tokens) {
+    const row = byKey.get(token) ?? byTicker.get(token);
+    if (!row) {
+      unknown.push(token);
+      continue;
+    }
+    if (!seen.has(row.companyKey)) {
+      seen.add(row.companyKey);
+      rows.push(row);
+    }
+  }
+  return { rows: sortRefreshRows(rows, kind, order), unknown };
+}
+
+function sortRefreshRows(rows: OpportunityRow[], kind: RefreshKind, order: RefreshOrder): OpportunityRow[] {
+  if (order === "given") return rows;
+  return [...rows].sort((a, b) => compareRefreshDates(refreshFreshnessDate(a, kind), refreshFreshnessDate(b, kind), order));
+}
+
+function refreshFreshnessDate(row: OpportunityRow, kind: RefreshKind): string | null {
+  if (kind === "prices") return row.reverse.pricesUpdatedAt;
+  if (kind === "financials") return row.reverse.financialsUpdatedAt;
+  return oldestDate([row.reverse.pricesUpdatedAt, row.reverse.financialsUpdatedAt]);
+}
+
+function compareRefreshDates(a: string | null, b: string | null, order: RefreshOrder): number {
+  if (a === b) return 0;
+  if (a === null) return order === "oldest-first" ? -1 : 1;
+  if (b === null) return order === "oldest-first" ? 1 : -1;
+  return order === "oldest-first" ? a.localeCompare(b) : b.localeCompare(a);
+}
+
+function formatKindLabel(kind: RefreshKind): string {
+  if (kind === "prices") return "Market only";
+  if (kind === "financials") return "Financials only";
+  return "Market + financials";
+}
+
+function formatOrderLabel(order: RefreshOrder): string {
+  if (order === "oldest-first") return "Oldest first";
+  if (order === "newest-first") return "Newest first";
+  return "Selection order";
+}
+
+function oldestDate(values: Array<string | null | undefined>): string | null {
+  return values.filter((value): value is string => Boolean(value)).sort()[0] ?? null;
 }
 
 function RefreshControl({ runs, refreshing, refreshStatus, runRefresh }: {
@@ -829,21 +1166,30 @@ function useTable<Row extends BaseRow>(
   return { hiddenKeys, visibleColumns, filteredRows };
 }
 
-function DataTable<Row extends BaseRow>({ rows, columns, loading, selectedKey, sortKey, sortDirection, onSort, onSelect }: {
+function DataTable<Row extends BaseRow>({ rows, columns, loading, selectedKey, selectedCompanyKeys, allVisibleSelected, sortKey, sortDirection, onSort, onSelect, onToggleRowSelection, onToggleVisibleSelection }: {
   rows: Row[];
   columns: TableColumn<Row>[];
   loading: boolean;
   selectedKey: string | null;
+  selectedCompanyKeys: Set<string>;
+  allVisibleSelected: boolean;
   sortKey: string;
   sortDirection: "asc" | "desc";
   onSort: (key: string) => void;
   onSelect: (key: string) => void;
+  onToggleRowSelection: (companyKey: string, shiftKey: boolean) => void;
+  onToggleVisibleSelection: () => void;
 }) {
   return (
     <div className="table-wrap">
       <table>
         <thead>
           <tr>
+            <th className="center select-column">
+              <button className="select-all-button" onClick={onToggleVisibleSelection} aria-label={allVisibleSelected ? "Clear visible company selection" : "Select visible companies"}>
+                {allVisibleSelected ? <CheckSquare size={15} /> : <Square size={15} />}
+              </button>
+            </th>
             {columns.map((column) => (
               <th key={column.key} className={column.align ?? "left"}>
                 <div className={`th-inner ${column.align ?? "left"}`}>
@@ -859,11 +1205,23 @@ function DataTable<Row extends BaseRow>({ rows, columns, loading, selectedKey, s
         </thead>
         <tbody>
           {loading ? (
-            <tr><td colSpan={columns.length}>Loading local cache...</td></tr>
+            <tr><td colSpan={columns.length + 1}>Loading local cache...</td></tr>
           ) : rows.length === 0 ? (
-            <tr><td colSpan={columns.length}>No companies match the current filters.</td></tr>
+            <tr><td colSpan={columns.length + 1}>No companies match the current filters.</td></tr>
           ) : rows.map((row) => (
             <tr key={row.companyKey} className={selectedKey === row.companyKey ? "selected" : ""} onClick={() => onSelect(row.companyKey)}>
+              <td className="center select-column">
+                <button
+                  className={`row-select-button ${selectedCompanyKeys.has(row.companyKey) ? "active" : ""}`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onToggleRowSelection(row.companyKey, event.shiftKey);
+                  }}
+                  aria-label={`${selectedCompanyKeys.has(row.companyKey) ? "Remove" : "Add"} ${row.ticker} ${selectedCompanyKeys.has(row.companyKey) ? "from" : "to"} selection`}
+                >
+                  {selectedCompanyKeys.has(row.companyKey) ? <CheckSquare size={15} /> : <Square size={15} />}
+                </button>
+              </td>
               {columns.map((column) => <td key={column.key} className={column.align ?? "left"}>{column.render(row)}</td>)}
             </tr>
           ))}

@@ -265,13 +265,58 @@ export interface CompanyDetail {
   sourceLinks: Array<{ label: string; url: string }>;
 }
 
+export type RefreshKind = "prices" | "financials" | "all";
+export type RefreshOrder = "given" | "oldest-first" | "newest-first";
+export type RefreshStatus = "running" | "success" | "failed" | "partial";
+export type RefreshItemStatus = "waiting" | "running" | "success" | "failed" | "skipped";
+export type RefreshLogLevel = "info" | "success" | "warning" | "error";
+
 export interface RefreshRun {
   id: number;
-  kind: "prices" | "financials";
-  status: "running" | "success" | "failed";
+  kind: RefreshKind;
+  status: RefreshStatus;
   startedAt: string;
   finishedAt: string | null;
   message: string | null;
+  companyCount?: number;
+  successCount?: number;
+  failureCount?: number;
+  order?: RefreshOrder | null;
+}
+
+export interface RefreshJobItem {
+  id: number;
+  refreshRunId: number;
+  companyKey: string;
+  ticker: string;
+  name: string;
+  sequence: number;
+  status: RefreshItemStatus;
+  startedAt: string | null;
+  finishedAt: string | null;
+  message: string | null;
+}
+
+export interface RefreshLogEntry {
+  id: number;
+  refreshRunId: number;
+  itemId: number | null;
+  companyKey: string | null;
+  ticker: string | null;
+  sequence: number;
+  level: RefreshLogLevel;
+  phase: string;
+  operation: string;
+  message: string;
+  data: Record<string, unknown> | null;
+  durationMs: number | null;
+  createdAt: string;
+}
+
+export interface RefreshRunDetail {
+  run: RefreshRun;
+  items: RefreshJobItem[];
+  logs: RefreshLogEntry[];
 }
 
 export interface ColumnPreference {
