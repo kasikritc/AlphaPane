@@ -1,13 +1,27 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { ArrowDownUp, ChevronDown, Columns3, DatabaseZap, RefreshCw, Search, Star } from "lucide-react";
+import {
+  Activity,
+  ArrowDownUp,
+  BadgeCheck,
+  ChevronDown,
+  Columns3,
+  DatabaseZap,
+  FileText,
+  Gauge,
+  LineChart,
+  RefreshCw,
+  Search,
+  Settings2,
+  ShieldCheck,
+  Star
+} from "lucide-react";
 import type {
   BasePeriod,
   ColumnPreference,
   CompanyDetail,
   CompanyRow,
   DailyEvPoint,
-  DashboardTab,
   ExitMetric,
   ImpliedGrowthHistoryData,
   ModelCell,
@@ -86,20 +100,52 @@ const valuationColumns: TableColumn<ValuationRow>[] = [
   { key: "note", label: "Note", render: (row) => (row.note.trim() ? "Yes" : "-"), sortValue: (row) => row.note }
 ];
 
+type WorkbenchSection = "signal" | "assumptions" | "history" | "audit" | "notes";
+type AgreementState = "confirmed" | "valuation-only" | "dcf-only" | "divergent" | "inconclusive";
+
+interface OpportunityRow extends BaseRow {
+  reverse: CompanyRow;
+  valuation: ValuationRow | null;
+  rank: number;
+  opportunityScore: number;
+  valuationScore: number | null;
+  dcfScore: number | null;
+  trustScore: number;
+  agreement: AgreementState;
+  evidenceLabel: string;
+  trustLabel: string;
+  freshnessDate: string | null;
+  reasons: string[];
+}
+
+const opportunityColumns: TableColumn<OpportunityRow>[] = [
+  { key: "actions", label: "", align: "center", render: (row) => <FavoriteButton row={row} /> },
+  { key: "rank", label: "Rank", align: "right", render: (row) => `#${row.rank}`, sortValue: (row) => row.opportunityScore },
+  { key: "evidence", label: "Evidence", render: (row) => <EvidenceRail row={row} />, sortValue: (row) => row.opportunityScore },
+  { key: "ticker", label: "Ticker", render: (row) => <TickerCell row={row} />, sortValue: (row) => row.ticker },
+  { key: "valuation", label: "Valuation", align: "right", render: (row) => <LensValue label="P/E Z" value={zScore(row.valuation?.pe.zScore ?? null)} tone="valuation" />, sortValue: (row) => row.valuation?.pe.zScore ?? null },
+  { key: "dcf", label: "DCF Gap", align: "right", render: (row) => <LensValue label="Growth" value={percent(row.reverse.cagrGap)} tone="dcf" />, sortValue: (row) => row.reverse.cagrGap },
+  { key: "agreement", label: "Agreement", render: (row) => <AgreementPill state={row.agreement} label={row.evidenceLabel} />, sortValue: (row) => agreementSort(row.agreement) },
+  { key: "trust", label: "Trust", render: (row) => <TrustPill score={row.trustScore} label={row.trustLabel} />, sortValue: (row) => row.trustScore },
+  { key: "price", label: "Price", align: "right", render: (row) => money(row.reverse.sharePrice), sortValue: (row) => row.reverse.sharePrice },
+  { key: "sector", label: "Sector", render: (row) => row.sector ?? "-", sortValue: (row) => row.sector },
+  { key: "freshness", label: "Freshness", render: (row) => dateShort(row.freshnessDate), sortValue: (row) => row.freshnessDate },
+  { key: "note", label: "Note", render: (row) => (row.note.trim() ? "Yes" : "-"), sortValue: (row) => row.note }
+];
+
 export function App() {
-  const [activeTab, setActiveTab] = useState<DashboardTab>("reverseDcf");
   const [rows, setRows] = useState<CompanyRow[]>([]);
   const [valuationRows, setValuationRows] = useState<ValuationRow[]>([]);
   const [preferences, setPreferences] = useState<ColumnPreference[]>([]);
-  const [valuationPreferences, setValuationPreferences] = useState<ColumnPreference[]>([]);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [detail, setDetail] = useState<CompanyDetail | null>(null);
   const [valuationDetail, setValuationDetail] = useState<ValuationDetail | null>(null);
   const [runs, setRuns] = useState<RefreshRun[]>([]);
   const [query, setQuery] = useState("");
   const [favoritesOnly, setFavoritesOnly] = useState(false);
-  const [sortKey, setSortKey] = useState<string>("impliedRevenueCagr");
-  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
+  const [sortKey, setSortKey] = useState<string>("opportunityScore");
+  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
+  const [workbenchSection, setWorkbenchSection] = useState<WorkbenchSection>("signal");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState<string | null>(null);
   const [refreshStatus, setRefreshStatus] = useState<string | null>(null);
@@ -109,10 +155,11 @@ export function App() {
     void loadDashboard();
   }, []);
 
+  const opportunities = useMemo(() => buildOpportunities(rows, valuationRows), [rows, valuationRows]);
+
   useEffect(() => {
-    setSortKey(activeTab === "reverseDcf" ? "impliedRevenueCagr" : "peZ");
-    setSortDirection("asc");
-  }, [activeTab]);
+    if (!selectedKey && opportunities.length > 0) setSelectedKey(opportunities[0].companyKey);
+  }, [selectedKey, opportunities]);
 
   useEffect(() => {
     if (!selectedKey) {
@@ -120,9 +167,8 @@ export function App() {
       setValuationDetail(null);
       return;
     }
-    if (activeTab === "reverseDcf") void loadDetail(selectedKey);
-    else void loadValuationDetail(selectedKey);
-  }, [selectedKey, activeTab]);
+    void loadSelectedCompany(selectedKey);
+  }, [selectedKey]);
 
   async function loadDashboard() {
     setLoading(true);
@@ -136,9 +182,7 @@ export function App() {
       setRows(reversePayload.rows);
       setPreferences(reversePayload.columns);
       setValuationRows(valuationPayload.rows);
-      setValuationPreferences(valuationPayload.columns);
       setRuns(refreshPayload.runs);
-      if (!selectedKey) setSelectedKey(reversePayload.rows[0]?.companyKey ?? valuationPayload.rows[0]?.companyKey ?? null);
     } catch (apiError) {
       setError(errorMessage(apiError));
     } finally {
@@ -146,20 +190,22 @@ export function App() {
     }
   }
 
-  async function loadDetail(companyKey: string) {
+  async function loadSelectedCompany(companyKey: string) {
     try {
-      setDetail(await api<CompanyDetail>(`/api/companies/${companyKey}`));
+      const [reverseDetail, valuation] = await Promise.all([
+        api<CompanyDetail>(`/api/companies/${companyKey}`),
+        api<ValuationDetail>(`/api/valuation/companies/${companyKey}`).catch(() => null)
+      ]);
+      setDetail(reverseDetail);
+      setValuationDetail(valuation);
     } catch (apiError) {
       setError(errorMessage(apiError));
     }
   }
 
-  async function loadValuationDetail(companyKey: string) {
-    try {
-      setValuationDetail(await api<ValuationDetail>(`/api/valuation/companies/${companyKey}`));
-    } catch (apiError) {
-      setError(errorMessage(apiError));
-    }
+  async function handleSaved() {
+    await loadDashboard();
+    if (selectedKey) await loadSelectedCompany(selectedKey);
   }
 
   function applyRefreshPayload(payload: RefreshPayload) {
@@ -173,17 +219,15 @@ export function App() {
     setError(null);
     try {
       if (kind === "all") {
-        setRefreshStatus("Refreshing financials…");
+        setRefreshStatus("Refreshing financial statements and model defaults");
         applyRefreshPayload(await api<RefreshPayload>("/api/refresh/financials", { method: "POST" }));
-        setRefreshStatus("Refreshing market & valuation…");
+        setRefreshStatus("Refreshing market data and valuation history");
         applyRefreshPayload(await api<RefreshPayload>("/api/refresh/prices", { method: "POST" }));
       } else {
+        setRefreshStatus(kind === "prices" ? "Refreshing market data and valuation history" : "Refreshing financial statements and model defaults");
         applyRefreshPayload(await api<RefreshPayload>(`/api/refresh/${kind}`, { method: "POST" }));
       }
-      if (selectedKey) {
-        if (activeTab === "reverseDcf") await loadDetail(selectedKey);
-        else await loadValuationDetail(selectedKey);
-      }
+      if (selectedKey) await loadSelectedCompany(selectedKey);
     } catch (apiError) {
       setError(errorMessage(apiError));
       const refreshPayload = await api<{ runs: RefreshRun[] }>("/api/refresh-runs");
@@ -194,139 +238,490 @@ export function App() {
     }
   }
 
-  const reverseFreshness = useMemo(() => {
-    const latest = latestDate(rows.flatMap((row) => [row.financialsUpdatedAt, row.pricesUpdatedAt]));
-    return latest ? `Data as of ${dateShort(latest)}` : "No data cached yet — click Refresh data";
-  }, [rows]);
-  const valuationFreshness = useMemo(() => {
-    const latest = latestDate(valuationRows.map((row) => row.valuationUpdatedAt));
-    return latest ? `Valuation data as of ${dateShort(latest)}` : "No valuation data cached yet — click Refresh data";
-  }, [valuationRows]);
-
-  const reverseTable = useTable(rows, reverseColumns, preferences, query, favoritesOnly, sortKey, sortDirection);
-  const valuationTable = useTable(valuationRows, valuationColumns, valuationPreferences, query, favoritesOnly, sortKey, sortDirection);
-
-  const table = activeTab === "reverseDcf" ? reverseTable : valuationTable;
-  const tableColumns = activeTab === "reverseDcf" ? reverseColumns : valuationColumns;
-  const currentPreferences = activeTab === "reverseDcf" ? preferences : valuationPreferences;
-  const setCurrentPreferences = activeTab === "reverseDcf" ? setPreferences : setValuationPreferences;
-
   async function toggleColumn(key: string) {
-    const hidden = new Set(currentPreferences.filter((pref) => pref.visible === false).map((pref) => pref.key));
+    const hidden = new Set(preferences.filter((pref) => pref.visible === false).map((pref) => pref.key));
     if (hidden.has(key)) hidden.delete(key);
     else hidden.add(key);
-    const next = tableColumns.filter((column) => column.key !== "actions").map((column) => ({ key: column.key, visible: !hidden.has(column.key) }));
-    setCurrentPreferences(next);
+    const next = opportunityColumns.filter((column) => column.key !== "actions").map((column) => ({ key: column.key, visible: !hidden.has(column.key) }));
+    setPreferences(next);
     await api("/api/preferences/columns", {
       method: "PATCH",
-      body: JSON.stringify({ columns: next, key: activeTab === "reverseDcf" ? "reverseDcfColumns" : "historicalValuationColumns" })
+      body: JSON.stringify({ columns: next, key: "reverseDcfColumns" })
     });
   }
 
-  return (
-    <div className="shell">
-      <header className="topbar">
-        <div>
-          <h1>AlphaPane</h1>
-          <p>AlphaPane market scanner for reverse DCF and historical valuation mean reversion.</p>
-        </div>
-        <div className="actions">
-          <button className="primary-refresh" onClick={() => void runRefresh("all")} disabled={Boolean(refreshing)}>
-            <RefreshCw size={16} className={refreshing ? "spin" : undefined} />
-            {refreshing ? refreshStatus ?? "Refreshing…" : "Refresh data"}
-          </button>
-          <details className="refresh-menu">
-            <summary aria-label="Advanced refresh options"><ChevronDown size={16} /></summary>
-            <div>
-              <button onClick={() => void runRefresh("prices")} disabled={Boolean(refreshing)}>
-                <RefreshCw size={15} />
-                <span><strong>Market &amp; valuation only</strong><small>Price, EV, current multiples, P/E z-scores &amp; σ-bands</small></span>
-              </button>
-              <button onClick={() => void runRefresh("financials")} disabled={Boolean(refreshing)}>
-                <DatabaseZap size={15} />
-                <span><strong>Financials &amp; DCF only</strong><small>Profile, revenue/FCF history, DCF default assumptions</small></span>
-              </button>
-            </div>
-          </details>
-        </div>
-      </header>
+  const latestFreshness = latestDate(opportunities.map((row) => row.freshnessDate));
+  const agreementCount = opportunities.filter((row) => row.agreement === "confirmed").length;
+  const weakTrustCount = opportunities.filter((row) => row.trustScore < 0.65).length;
+  const selectedOpportunity = opportunities.find((row) => row.companyKey === selectedKey) ?? null;
+  const table = useTable(opportunities, opportunityColumns, preferences, query, favoritesOnly, sortKey, sortDirection);
 
-      <nav className="tabs" aria-label="Scanner views">
-        <button className={activeTab === "reverseDcf" ? "active" : ""} onClick={() => setActiveTab("reverseDcf")}>Reverse DCF</button>
-        <button className={activeTab === "historicalValuation" ? "active" : ""} onClick={() => setActiveTab("historicalValuation")}>Historical Valuation</button>
-      </nav>
+  return (
+    <div className="shell cockpit-shell">
+      <header className="topbar cockpit-topbar">
+        <div className="brand-lockup">
+          <span className="brand-mark">AP</span>
+          <div>
+            <h1>AlphaPane</h1>
+            <p>Evidence-ranked research queue for a curated investment universe.</p>
+          </div>
+        </div>
+        <div className="cockpit-metrics" aria-label="Universe status">
+          <Metric label="Universe" value={String(opportunities.length)} />
+          <Metric label="Agreement" value={String(agreementCount)} />
+          <Metric label="Audit flags" value={String(weakTrustCount)} />
+          <Metric label="Freshness" value={dateShort(latestFreshness)} />
+        </div>
+        <RefreshControl runs={runs} refreshing={refreshing} refreshStatus={refreshStatus} runRefresh={runRefresh} />
+      </header>
 
       {error && <div className="error">{error}</div>}
 
-      <main className="layout with-tabs">
-        <section className="table-section">
-          <div className="toolbar">
-            <label className="search">
-              <Search size={16} />
-              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search ticker, company, sector" />
-            </label>
-            <label className="check">
-              <input type="checkbox" checked={favoritesOnly} onChange={(event) => setFavoritesOnly(event.target.checked)} />
-              Favorites
-            </label>
-            <span className="freshness" title="Click Refresh data to fetch the latest figures from Fiscal.ai">
-              {activeTab === "reverseDcf" ? reverseFreshness : valuationFreshness}
-            </span>
-            <details className="columns-menu">
-              <summary><Columns3 size={16} /> Columns</summary>
-              <div>
-                {tableColumns.filter((column) => column.key !== "actions").map((column) => (
-                  <label key={column.key}>
-                    <input type="checkbox" checked={!table.hiddenKeys.has(column.key)} onChange={() => void toggleColumn(column.key)} />
-                    {column.label}
-                  </label>
-                ))}
-              </div>
-            </details>
+      <main className="layout cockpit-layout">
+        <section className="table-section opportunity-section">
+          <div className="queue-header">
+            <div>
+              <p className="eyebrow">Opportunity queue</p>
+              <h2>Open the companies where the evidence agrees first.</h2>
+            </div>
+            <div className="queue-actions">
+              <label className="search">
+                <Search size={16} />
+                <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search ticker, company, sector" />
+              </label>
+              <label className="check">
+                <input type="checkbox" checked={favoritesOnly} onChange={(event) => setFavoritesOnly(event.target.checked)} />
+                Favorites
+              </label>
+              <details className="columns-menu">
+                <summary><Columns3 size={16} /> Columns</summary>
+                <div>
+                  {opportunityColumns.filter((column) => column.key !== "actions").map((column) => (
+                    <label key={column.key}>
+                      <input type="checkbox" checked={!table.hiddenKeys.has(column.key)} onChange={() => void toggleColumn(column.key)} />
+                      {column.label}
+                    </label>
+                  ))}
+                </div>
+              </details>
+            </div>
           </div>
-
-          {activeTab === "reverseDcf" ? (
-            <DataTable<CompanyRow>
-              rows={reverseTable.filteredRows}
-              columns={reverseTable.visibleColumns}
-              loading={loading}
-              selectedKey={selectedKey}
-              sortKey={sortKey}
-              sortDirection={sortDirection}
-              onSort={(key) => {
-                if (sortKey === key) setSortDirection(sortDirection === "asc" ? "desc" : "asc");
-                else setSortKey(key);
-              }}
-              onSelect={setSelectedKey}
-            />
-          ) : (
-            <DataTable<ValuationRow>
-              rows={valuationTable.filteredRows}
-              columns={valuationTable.visibleColumns}
-              loading={loading}
-              selectedKey={selectedKey}
-              sortKey={sortKey}
-              sortDirection={sortDirection}
-              onSort={(key) => {
-                if (sortKey === key) setSortDirection(sortDirection === "asc" ? "desc" : "asc");
-                else setSortKey(key);
-              }}
-              onSelect={setSelectedKey}
-            />
-          )}
+          <div className="evidence-key" aria-label="Evidence lens legend">
+            <span><i className="valuation-dot" /> Historical valuation is the objective lens</span>
+            <span><i className="dcf-dot" /> Reverse DCF is the judgment lens</span>
+            <span><i className="confirmed-dot" /> Agreement is the strongest signal</span>
+          </div>
+          <DataTable<OpportunityRow>
+            rows={table.filteredRows}
+            columns={table.visibleColumns}
+            loading={loading}
+            selectedKey={selectedKey}
+            sortKey={sortKey}
+            sortDirection={sortDirection}
+            onSort={(key) => {
+              if (key === "actions") return;
+              if (sortKey === key) setSortDirection(sortDirection === "asc" ? "desc" : "asc");
+              else {
+                setSortKey(key);
+                setSortDirection(key === "opportunityScore" || key === "rank" || key === "trust" ? "desc" : "asc");
+              }
+            }}
+            onSelect={setSelectedKey}
+          />
         </section>
 
-        <aside className="detail-panel">
-          {activeTab === "reverseDcf" ? (
-            detail ? <ReverseDcfDetailView detail={detail} onSaved={loadDashboard} /> : <EmptyDetail runs={runs} label="reverse DCF model grid" />
-          ) : valuationDetail ? (
-            <ValuationDetailView detail={valuationDetail} onSaved={loadDashboard} />
-          ) : (
-            <EmptyDetail runs={runs} label="historical valuation chart" />
-          )}
+        <aside className="detail-panel workbench-panel">
+          <CompanyWorkbench
+            opportunity={selectedOpportunity}
+            detail={detail}
+            valuationDetail={valuationDetail}
+            section={workbenchSection}
+            setSection={setWorkbenchSection}
+            runs={runs}
+            onSaved={handleSaved}
+          />
         </aside>
       </main>
     </div>
+  );
+}
+
+function RefreshControl({ runs, refreshing, refreshStatus, runRefresh }: {
+  runs: RefreshRun[];
+  refreshing: string | null;
+  refreshStatus: string | null;
+  runRefresh: (kind: "all" | "prices" | "financials") => Promise<void>;
+}) {
+  const latestRun = runs[0];
+  return (
+    <div className="refresh-control">
+      <div>
+        <span>Data control</span>
+        <strong>{refreshing ? refreshStatus ?? "Refreshing" : latestRun ? `${latestRun.kind}: ${latestRun.status}` : "No refreshes yet"}</strong>
+      </div>
+      <button className="primary-refresh" onClick={() => void runRefresh("all")} disabled={Boolean(refreshing)}>
+        <RefreshCw size={16} className={refreshing ? "spin" : undefined} />
+        {refreshing ? "Running" : "Refresh all"}
+      </button>
+      <details className="refresh-menu">
+        <summary aria-label="Advanced refresh options"><ChevronDown size={16} /></summary>
+        <div>
+          <button onClick={() => void runRefresh("prices")} disabled={Boolean(refreshing)}>
+            <Activity size={15} />
+            <span><strong>Market and valuation</strong><small>Prices, multiples, P/E bands, daily EV history</small></span>
+          </button>
+          <button onClick={() => void runRefresh("financials")} disabled={Boolean(refreshing)}>
+            <DatabaseZap size={15} />
+            <span><strong>Financials and DCF</strong><small>Statements, sources, defaults, model outputs</small></span>
+          </button>
+        </div>
+      </details>
+    </div>
+  );
+}
+
+function CompanyWorkbench({ opportunity, detail, valuationDetail, section, setSection, runs, onSaved }: {
+  opportunity: OpportunityRow | null;
+  detail: CompanyDetail | null;
+  valuationDetail: ValuationDetail | null;
+  section: WorkbenchSection;
+  setSection: (section: WorkbenchSection) => void;
+  runs: RefreshRun[];
+  onSaved: () => Promise<void>;
+}) {
+  if (!opportunity || !detail) return <EmptyDetail runs={runs} label="company workbench" />;
+  const nav: Array<{ key: WorkbenchSection; label: string; icon: ReactNode }> = [
+    { key: "signal", label: "Signal", icon: <Gauge size={15} /> },
+    { key: "assumptions", label: "Assumptions", icon: <Settings2 size={15} /> },
+    { key: "history", label: "History", icon: <LineChart size={15} /> },
+    { key: "audit", label: "Audit", icon: <ShieldCheck size={15} /> },
+    { key: "notes", label: "Notes", icon: <FileText size={15} /> }
+  ];
+  return (
+    <>
+      <div className="workbench-header">
+        <div>
+          <p className="eyebrow">Selected company</p>
+          <h2>{detail.row.ticker}</h2>
+          <p>{detail.row.name}</p>
+        </div>
+        <AgreementPill state={opportunity.agreement} label={opportunity.evidenceLabel} />
+      </div>
+      <div className="workbench-evidence">
+        <EvidenceRail row={opportunity} expanded />
+        <TrustPill score={opportunity.trustScore} label={opportunity.trustLabel} />
+      </div>
+      <nav className="workbench-tabs" aria-label="Company workbench sections">
+        {nav.map((item) => (
+          <button key={item.key} className={section === item.key ? "active" : ""} onClick={() => setSection(item.key)}>
+            {item.icon}{item.label}
+          </button>
+        ))}
+      </nav>
+      {section === "signal" && <SignalWorkbench opportunity={opportunity} detail={detail} valuationDetail={valuationDetail} />}
+      {section === "assumptions" && <AssumptionsWorkbench detail={detail} onSaved={onSaved} />}
+      {section === "history" && <HistoryWorkbench detail={detail} valuationDetail={valuationDetail} />}
+      {section === "audit" && <AuditWorkbench detail={detail} valuationDetail={valuationDetail} />}
+      {section === "notes" && <NotesWorkbench detail={detail} onSaved={onSaved} />}
+    </>
+  );
+}
+
+function SignalWorkbench({ opportunity, detail, valuationDetail }: { opportunity: OpportunityRow; detail: CompanyDetail; valuationDetail: ValuationDetail | null }) {
+  return (
+    <div className="workbench-section">
+      {detail.row.caution && <div className="caution">{detail.row.caution}</div>}
+      <div className="lens-grid">
+        <LensCard
+          tone="valuation"
+          title="Historical valuation"
+          status={valuationDetail?.row.pe.status === "ok" ? "Objective lens ready" : "Needs more observations"}
+          primary={zScore(valuationDetail?.row.pe.zScore ?? null)}
+          secondary={`P/E percentile ${percent(valuationDetail?.row.pe.percentileRank ?? null)}`}
+        />
+        <LensCard
+          tone="dcf"
+          title="Reverse DCF"
+          status="Investor judgment required"
+          primary={percent(detail.row.impliedRevenueCagr)}
+          secondary={`History ${percent(detail.row.historicalRevenueCagr5y)} / gap ${percent(detail.row.cagrGap)}`}
+        />
+      </div>
+      <section className="section signal-brief">
+        <h3>Why this company is here</h3>
+        <ul>
+          {opportunity.reasons.map((reason) => <li key={reason}>{reason}</li>)}
+        </ul>
+      </section>
+      <div className="metrics-strip">
+        <Metric label="Score" value={opportunity.opportunityScore.toFixed(0)} />
+        <Metric label="P/E Z" value={zScore(valuationDetail?.row.pe.zScore ?? null)} />
+        <Metric label="Priced-in CAGR" value={percent(detail.row.impliedRevenueCagr)} />
+        <Metric label="Trust" value={`${Math.round(opportunity.trustScore * 100)}%`} />
+      </div>
+    </div>
+  );
+}
+
+function AssumptionsWorkbench({ detail, onSaved }: { detail: CompanyDetail; onSaved: () => Promise<void> }) {
+  const [assumptions, setAssumptions] = useState(() => initialAssumptions(detail));
+  useEffect(() => setAssumptions(initialAssumptions(detail)), [detail]);
+  const isExitMode = assumptions.terminalMethod === "exit-multiple";
+
+  async function saveAssumptions() {
+    await api(`/api/companies/${detail.row.companyKey}/assumptions`, { method: "PATCH", body: JSON.stringify(assumptions) });
+    await onSaved();
+  }
+
+  return (
+    <div className="workbench-section">
+      <section className="section assumption-console">
+        <h3>Model controls</h3>
+        <div className="assumption-grid">
+          <label>Base period
+            <select value={assumptions.basePeriod ?? ""} onChange={(event) => setAssumptions({ ...assumptions, basePeriod: parseBasePeriod(event.target.value) })}>
+              <option value="" disabled>Select base</option>
+              <option value="ltm" disabled={!detail.baseFinancials.ltm}>LTM</option>
+              <option value="annual" disabled={!detail.baseFinancials.annual}>Latest Annual</option>
+            </select>
+          </label>
+          <InputPercent label="FCF margin" value={assumptions.normalizedFcfMargin} onChange={(value) => setAssumptions({ ...assumptions, normalizedFcfMargin: value })} />
+          <InputPercent label="Discount rate" value={assumptions.discountRate} onChange={(value) => setAssumptions({ ...assumptions, discountRate: value })} />
+          <label>Terminal method
+            <select value={assumptions.terminalMethod} onChange={(event) => setAssumptions({ ...assumptions, terminalMethod: parseTerminalMethod(event.target.value) })}>
+              <option value="perpetuity">Perpetuity Growth</option>
+              <option value="exit-multiple">Exit Multiple</option>
+            </select>
+          </label>
+          {!isExitMode && <InputPercent label="Terminal growth" value={assumptions.terminalGrowth} onChange={(value) => setAssumptions({ ...assumptions, terminalGrowth: value })} />}
+          {isExitMode && (
+            <label>Exit metric
+              <select value={assumptions.exitMetric} onChange={(event) => setAssumptions({ ...assumptions, exitMetric: parseExitMetric(event.target.value) })}>
+                <option value="fcf">FCF</option>
+                <option value="ebitda">EBITDA</option>
+                <option value="revenue">Revenue</option>
+              </select>
+            </label>
+          )}
+          {isExitMode && <InputNumber label="Exit multiple" value={assumptions.exitMultiple} onChange={(value) => setAssumptions({ ...assumptions, exitMultiple: value })} />}
+          {isExitMode && assumptions.exitMetric === "ebitda" && <InputPercent label="EBITDA margin" value={assumptions.normalizedEbitdaMargin} onChange={(value) => setAssumptions({ ...assumptions, normalizedEbitdaMargin: value })} />}
+        </div>
+        {isExitMode && <ExitMultipleStatsTable detail={detail} metric={assumptions.exitMetric} />}
+        <button className="primary-action" onClick={() => void saveAssumptions()}>Save assumptions</button>
+      </section>
+      <section className="section"><h3>Base financials</h3><BaseFinancialsTable detail={detail} selected={assumptions.basePeriod} /></section>
+      <SensitivitySection tables={detail.sensitivity} />
+    </div>
+  );
+}
+
+function HistoryWorkbench({ detail, valuationDetail }: { detail: CompanyDetail; valuationDetail: ValuationDetail | null }) {
+  return (
+    <div className="workbench-section">
+      {valuationDetail && <section className="section"><h3>P/E Band</h3><PeBandChart history={valuationDetail.peHistory} /></section>}
+      <ImpliedGrowthHistorySection detail={detail} />
+    </div>
+  );
+}
+
+function AuditWorkbench({ detail, valuationDetail }: { detail: CompanyDetail; valuationDetail: ValuationDetail | null }) {
+  return (
+    <div className="workbench-section">
+      <section className="section"><h3>Default sources</h3><div className="source-grid"><Metric label="Revenue" value={detail.sources.latestRevenue ?? "-"} /><Metric label="FCF margin" value={detail.sources.normalizedFcfMargin ?? "-"} /><Metric label="History CAGR" value={detail.sources.historicalRevenueCagr5y ?? "-"} /><Metric label="Exit multiple" value={detail.sources.exitMultiple ?? "-"} /></div></section>
+      <EvBridgeSection detail={detail} />
+      <ModelDiagnosticsSection detail={detail} />
+      {valuationDetail && <section className="section"><h3>Valuation multiples</h3><div className="metric-table-wrap"><table className="model-grid"><thead><tr><th>Metric</th><th>Current</th><th>Mean</th><th>Z</th><th>Percentile</th><th>Obs</th></tr></thead><tbody>{valuationDetail.metrics.map((metric) => <MetricStatsRow key={metric.key} metric={metric} />)}</tbody></table></div></section>}
+      <section className="section"><h3>Model grid</h3><ModelGrid detail={detail} /></section>
+      <SourcesSection links={detail.sourceLinks} terminalUrl={detail.row.terminalUrl} />
+    </div>
+  );
+}
+
+function NotesWorkbench({ detail, onSaved }: { detail: CompanyDetail; onSaved: () => Promise<void> }) {
+  const [note, setNote] = useState(detail.row.note);
+  useEffect(() => setNote(detail.row.note), [detail]);
+  async function saveNote() {
+    await api(`/api/companies/${detail.row.companyKey}/state`, { method: "PATCH", body: JSON.stringify({ note }) });
+    await onSaved();
+  }
+  return <div className="workbench-section"><NoteSection note={note} setNote={setNote} saveNote={saveNote} /></div>;
+}
+
+function buildOpportunities(rows: CompanyRow[], valuationRows: ValuationRow[]): OpportunityRow[] {
+  const valuationByKey = new Map(valuationRows.map((row) => [row.companyKey, row]));
+  const scored = rows.map((reverse) => {
+    const valuation = valuationByKey.get(reverse.companyKey) ?? null;
+    const valuationScore = scoreValuationLens(valuation);
+    const dcfScore = scoreDcfLens(reverse);
+    const agreement = classifyAgreement(valuationScore, dcfScore);
+    const trustScore = scoreTrust(reverse, valuation);
+    const opportunityScore = Math.max(0, Math.min(100,
+      45 +
+      (valuationScore ?? 0) * 23 +
+      (dcfScore ?? 0) * 23 +
+      (agreement === "confirmed" ? 14 : agreement === "divergent" ? -12 : 0) +
+      (trustScore - 0.7) * 16
+    ));
+    return {
+      companyKey: reverse.companyKey,
+      ticker: reverse.ticker,
+      name: reverse.name,
+      sector: reverse.sector,
+      isFavorite: reverse.isFavorite,
+      note: reverse.note,
+      reverse,
+      valuation,
+      rank: 0,
+      opportunityScore,
+      valuationScore,
+      dcfScore,
+      trustScore,
+      agreement,
+      evidenceLabel: evidenceLabel(agreement),
+      trustLabel: trustLabel(trustScore, reverse, valuation),
+      freshnessDate: latestDate([reverse.financialsUpdatedAt, reverse.pricesUpdatedAt, valuation?.valuationUpdatedAt ?? null]),
+      reasons: opportunityReasons(reverse, valuation, valuationScore, dcfScore, agreement, trustScore)
+    } satisfies OpportunityRow;
+  }).sort((a, b) => b.opportunityScore - a.opportunityScore);
+  return scored.map((row, index) => ({ ...row, rank: index + 1 }));
+}
+
+function scoreValuationLens(row: ValuationRow | null): number | null {
+  if (!row || row.pe.status !== "ok") return null;
+  const scores = [row.pe, row.evSales, row.evEbitda, row.priceSales, row.fcfYield]
+    .map((metric) => metric.status === "ok" && Number.isFinite(metric.zScore) ? -(metric.zScore as number) / 2 : null)
+    .filter((value): value is number => value !== null);
+  if (scores.length === 0) return null;
+  return clamp(scores.reduce((sum, value) => sum + value, 0) / scores.length, -1, 1);
+}
+
+function scoreDcfLens(row: CompanyRow): number | null {
+  if (!Number.isFinite(row.cagrGap)) return null;
+  return clamp(-(row.cagrGap as number) / 0.08, -1, 1);
+}
+
+function scoreTrust(reverse: CompanyRow, valuation: ValuationRow | null): number {
+  let score = 1;
+  if (!reverse.financialsUpdatedAt) score -= 0.2;
+  if (!reverse.pricesUpdatedAt) score -= 0.2;
+  if (!valuation?.valuationUpdatedAt) score -= 0.15;
+  if (reverse.signal === "insufficient data") score -= 0.25;
+  if (valuation && valuation.pe.status !== "ok") score -= 0.2;
+  if (reverse.caution) score -= 0.12;
+  return clamp(score, 0, 1);
+}
+
+function classifyAgreement(valuationScore: number | null, dcfScore: number | null): AgreementState {
+  const valuationPositive = valuationScore !== null && valuationScore > 0.15;
+  const dcfPositive = dcfScore !== null && dcfScore > 0.15;
+  const valuationNegative = valuationScore !== null && valuationScore < -0.15;
+  const dcfNegative = dcfScore !== null && dcfScore < -0.15;
+  if (valuationPositive && dcfPositive) return "confirmed";
+  if (valuationPositive && dcfScore !== null && !dcfPositive) return "valuation-only";
+  if (dcfPositive && valuationScore !== null && !valuationPositive) return "dcf-only";
+  if ((valuationPositive && dcfNegative) || (dcfPositive && valuationNegative)) return "divergent";
+  return "inconclusive";
+}
+
+function opportunityReasons(
+  reverse: CompanyRow,
+  valuation: ValuationRow | null,
+  valuationScore: number | null,
+  dcfScore: number | null,
+  agreement: AgreementState,
+  trustScore: number
+): string[] {
+  const reasons: string[] = [];
+  if (agreement === "confirmed") reasons.push("Historical valuation and reverse DCF both point toward a potentially interesting setup.");
+  if (agreement === "valuation-only") reasons.push("Historical valuation looks statistically cheap, but the DCF expectation lens does not yet confirm it.");
+  if (agreement === "dcf-only") reasons.push("Priced-in growth looks low versus history, but the objective valuation lens does not yet confirm it.");
+  if (agreement === "divergent") reasons.push("The two evidence lenses disagree, so this needs judgment before it deserves deeper work.");
+  if (agreement === "inconclusive") reasons.push("The available evidence is not yet strong enough to create a high-confidence queue signal.");
+  if (valuationScore !== null) reasons.push(`Valuation lens score: ${signedNumber(valuationScore)} from the company\'s own multiple history.`);
+  if (dcfScore !== null) reasons.push(`DCF lens score: ${signedNumber(dcfScore)} from priced-in growth versus historical growth.`);
+  if (valuation?.pe.status !== "ok") reasons.push("P/E history does not have enough valid observations for the objective lens.");
+  if (reverse.signal === "insufficient data") reasons.push("Reverse DCF output is limited by missing or invalid model inputs.");
+  if (reverse.caution) reasons.push(reverse.caution);
+  if (trustScore < 0.65) reasons.push("Audit score is weak; inspect freshness, sources, and diagnostics before relying on the signal.");
+  return reasons;
+}
+
+function evidenceLabel(state: AgreementState): string {
+  switch (state) {
+    case "confirmed": return "Both lenses agree";
+    case "valuation-only": return "Valuation only";
+    case "dcf-only": return "DCF only";
+    case "divergent": return "Lenses diverge";
+    default: return "Inconclusive";
+  }
+}
+
+function agreementSort(state: AgreementState): number {
+  switch (state) {
+    case "confirmed": return 5;
+    case "valuation-only": return 4;
+    case "dcf-only": return 3;
+    case "divergent": return 2;
+    default: return 1;
+  }
+}
+
+function trustLabel(score: number, reverse: CompanyRow, valuation: ValuationRow | null): string {
+  if (score >= 0.85) return "High audit confidence";
+  if (!reverse.financialsUpdatedAt || !reverse.pricesUpdatedAt || !valuation?.valuationUpdatedAt) return "Refresh needed";
+  if (reverse.signal === "insufficient data" || valuation?.pe.status !== "ok") return "Insufficient data";
+  return "Inspect audit trail";
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function signedNumber(value: number): string {
+  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
+}
+
+function EvidenceRail({ row, expanded = false }: { row: OpportunityRow; expanded?: boolean }) {
+  const valuation = scoreToPercent(row.valuationScore);
+  const dcf = scoreToPercent(row.dcfScore);
+  return (
+    <div className={`evidence-rail ${expanded ? "expanded" : ""}`}>
+      <div className="rail-row"><span>Valuation</span><i><b className="valuation-bar" style={{ width: `${valuation}%` }} /></i><strong>{row.valuationScore === null ? "-" : signedNumber(row.valuationScore)}</strong></div>
+      <div className="rail-row"><span>DCF</span><i><b className="dcf-bar" style={{ width: `${dcf}%` }} /></i><strong>{row.dcfScore === null ? "-" : signedNumber(row.dcfScore)}</strong></div>
+    </div>
+  );
+}
+
+function scoreToPercent(score: number | null): number {
+  if (score === null) return 4;
+  return 8 + clamp((score + 1) / 2, 0, 1) * 92;
+}
+
+function TickerCell({ row }: { row: OpportunityRow }) {
+  return <div className="ticker-cell"><strong>{row.ticker}</strong><span>{row.name}</span></div>;
+}
+
+function LensValue({ label, value, tone }: { label: string; value: string; tone: "valuation" | "dcf" }) {
+  return <div className={`lens-value ${tone}`}><span>{label}</span><strong>{value}</strong></div>;
+}
+
+function AgreementPill({ state, label }: { state: AgreementState; label: string }) {
+  return <span className={`agreement-pill ${state}`}>{state === "confirmed" && <BadgeCheck size={13} />}{label}</span>;
+}
+
+function TrustPill({ score, label }: { score: number; label: string }) {
+  const level = score >= 0.85 ? "high" : score >= 0.65 ? "medium" : "low";
+  return <span className={`trust-pill ${level}`}><ShieldCheck size={13} />{label}</span>;
+}
+
+function LensCard({ tone, title, status, primary, secondary }: { tone: "valuation" | "dcf"; title: string; status: string; primary: string; secondary: string }) {
+  return (
+    <section className={`lens-card ${tone}`}>
+      <span>{status}</span>
+      <h3>{title}</h3>
+      <strong>{primary}</strong>
+      <p>{secondary}</p>
+    </section>
   );
 }
 
