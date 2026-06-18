@@ -1,4 +1,6 @@
 import type { ValuationHistoryPoint, ValuationMetricKey, ValuationMetricStats } from "@alphapane/shared";
+import type { StockPricePoint } from "./stockPrice.js";
+import { stockClosePrice } from "./stockPrice.js";
 
 export interface RatioConfig {
   key: ValuationMetricKey;
@@ -12,10 +14,7 @@ export interface RatioPoint {
   ratio: number;
 }
 
-export interface PricePoint {
-  date: string;
-  close_price: number;
-}
+export type PricePoint = StockPricePoint;
 
 export interface ValuationSnapshotInput {
   metrics: Record<ValuationMetricKey, ValuationMetricStats>;
@@ -103,7 +102,7 @@ function buildPeHistory(
   bandLevels: Record<string, number | null>,
   years: number
 ): ValuationHistoryPoint[] {
-  const pricesByDate = new Map(prices.map((price) => [price.date, numberOrNull(price.close_price)]));
+  const pricesByDate = new Map(prices.map((price) => [price.date, stockClosePrice(price)]));
   return windowedValidRatios(pePoints, years).map((point) => {
     const price = pricesByDate.get(point.date) ?? null;
     const impliedEps = isPositive(price) && isPositive(point.ratio) ? (price as number) / point.ratio : null;

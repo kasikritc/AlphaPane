@@ -1,4 +1,5 @@
 import { getConfig } from "./config.js";
+import type { StockPricePoint } from "./stockPrice.js";
 
 type Query = Record<string, string | number | boolean | null | undefined>;
 
@@ -56,7 +57,7 @@ export class FiscalClient {
     return this.request(`/v1/company/ratios/daily/${ratioId}`, { companyKey, currency: "USD" });
   }
 
-  async stockPrices(companyKey: string): Promise<Array<{ date: string; open_price: number; close_price: number; volume: number }>> {
+  async stockPrices(companyKey: string): Promise<StockPricePoint[]> {
     return this.request("/v1/company/stock-prices", { companyKey });
   }
 

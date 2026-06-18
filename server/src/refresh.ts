@@ -17,6 +17,7 @@ import {
   upsertMarketSnapshot,
   upsertValuationSnapshot
 } from "./repository.js";
+import { stockClosePrice } from "./stockPrice.js";
 import { buildValuationSnapshot, VALUATION_RATIOS } from "./valuation.js";
 
 interface StandardizedRow {
@@ -149,7 +150,7 @@ async function refreshDailyEvHistory(db: DatabaseSync, companyKey: string, clien
       .filter((point: { date: string; enterpriseValue: number | null }) => point.date);
     const pricePoints = prices.map((point) => ({
       date: String(point.date).slice(0, 10),
-      sharePrice: numberOrNull(point.close_price)
+      sharePrice: stockClosePrice(point)
     }));
     upsertDailyEvHistory(db, companyKey, evPoints, pricePoints);
     logger.log({ level: "success", phase: "dailyEv", operation: "upsertDailyEvHistory", message: "Cached daily EV and price history.", data: { evPoints: evPoints.length, pricePoints: pricePoints.length } });
