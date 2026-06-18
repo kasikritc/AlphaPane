@@ -174,7 +174,37 @@ function migrate(db: DatabaseSync): void {
       status TEXT NOT NULL,
       started_at TEXT NOT NULL,
       finished_at TEXT,
+      message TEXT,
+      company_count INTEGER NOT NULL DEFAULT 0,
+      success_count INTEGER NOT NULL DEFAULT 0,
+      failure_count INTEGER NOT NULL DEFAULT 0,
+      refresh_order TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS refresh_run_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      refresh_run_id INTEGER NOT NULL REFERENCES refresh_runs(id) ON DELETE CASCADE,
+      company_key TEXT NOT NULL REFERENCES companies(company_key) ON DELETE CASCADE,
+      sequence INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      started_at TEXT,
+      finished_at TEXT,
       message TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS refresh_run_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      refresh_run_id INTEGER NOT NULL REFERENCES refresh_runs(id) ON DELETE CASCADE,
+      item_id INTEGER REFERENCES refresh_run_items(id) ON DELETE CASCADE,
+      company_key TEXT REFERENCES companies(company_key) ON DELETE CASCADE,
+      sequence INTEGER NOT NULL,
+      level TEXT NOT NULL,
+      phase TEXT NOT NULL,
+      operation TEXT NOT NULL,
+      message TEXT NOT NULL,
+      data_json TEXT,
+      duration_ms INTEGER,
+      created_at TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS daily_ev_history (
@@ -207,6 +237,10 @@ function migrate(db: DatabaseSync): void {
   addColumnIfMissing(db, 'assumption_overrides', 'normalized_ebitda_margin', 'REAL');
   addColumnIfMissing(db, 'model_outputs', 'diagnostics_json', "TEXT NOT NULL DEFAULT '{}'");
   addColumnIfMissing(db, 'model_outputs', 'sensitivity_json', "TEXT NOT NULL DEFAULT '[]'");
+  addColumnIfMissing(db, 'refresh_runs', 'company_count', 'INTEGER NOT NULL DEFAULT 0');
+  addColumnIfMissing(db, 'refresh_runs', 'success_count', 'INTEGER NOT NULL DEFAULT 0');
+  addColumnIfMissing(db, 'refresh_runs', 'failure_count', 'INTEGER NOT NULL DEFAULT 0');
+  addColumnIfMissing(db, 'refresh_runs', 'refresh_order', 'TEXT');
 }
 
 function addColumnIfMissing(db: DatabaseSync, table: string, column: string, definition: string): void {

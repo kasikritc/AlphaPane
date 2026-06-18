@@ -1,12 +1,16 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { BasePeriod, EvBridge, ExitMetric, ExitMultipleStat, FinancialBase } from "@alphapane/shared";
+import type { BasePeriod, EvBridge, ExitMetric, ExitMultipleStat, FinancialBase, RefreshKind, RefreshLogLevel, RefreshOrder, RefreshStatus } from "@alphapane/shared";
 import { TRIAL_COMPANIES } from "@alphapane/shared";
 import { FiscalClient } from "./fiscalClient.js";
 import { cagr, defaultDiscountRate, median, normalizeTerminalGrowth } from "./math.js";
 import {
+  appendRefreshLog,
+  createRefreshRunItem,
   createRefreshRun,
   finishRefreshRun,
+  getCompanyRows,
   recomputeModels,
+  updateRefreshRunItem,
   upsertCompanyProfile,
   upsertDailyEvHistory,
   upsertFinancialSnapshot,
@@ -22,64 +26,121 @@ interface StandardizedRow {
   metricsValues: Record<string, any>;
 }
 
+interface RefreshBatchOptions {
+  companyKeys?: string[];
+  kind: RefreshKind;
+  order?: RefreshOrder;
+  continueOnError?: boolean;
+}
+
+interface RefreshLogger {
+  runId: number;
+  itemId: number | null;
+  companyKey: string | null;
+  log: (input: {
+    level: RefreshLogLevel;
+    phase: string;
+    operation: string;
+    message: string;
+    data?: Record<string, unknown> | null;
+    durationMs?: number | null;
+  }) => void;
+}
+
 export async function refreshPrices(db: DatabaseSync, client = new FiscalClient()): Promise<void> {
-  const runId = createRefreshRun(db, "prices");
-  try {
-    for (const companyKey of TRIAL_COMPANIES) {
-      const ratios = await client.companyRatios(companyKey, "latest");
-      const latest = selectLatestRatioRow(ratios);
-      upsertMarketSnapshot(db, companyKey, latest);
-      await refreshValuationSnapshot(db, companyKey, client);
-      await refreshDailyEvHistory(db, companyKey, client);
-    }
-    recomputeModels(db);
-    finishRefreshRun(db, runId, "success", `Updated market data for ${TRIAL_COMPANIES.length} companies.`);
-  } catch (error) {
-    finishRefreshRun(db, runId, "failed", errorMessage(error));
-    throw error;
-  }
+  const result = await refreshBatch(db, { kind: "prices", companyKeys: [...TRIAL_COMPANIES], order: "given", continueOnError: false }, client);
+  if (result.status === "failed") throw new Error(result.message ?? "Price refresh failed.");
 }
 
 export async function refreshFinancials(db: DatabaseSync, client = new FiscalClient()): Promise<void> {
-  const runId = createRefreshRun(db, "financials");
-  try {
-    for (const companyKey of TRIAL_COMPANIES) {
-      const [profile, ratios, income, cashFlow, balanceSheet] = await Promise.all([
-        client.companyProfile(companyKey),
-        client.companyRatios(companyKey, "latest,annual"),
-        client.standardizedFinancials(companyKey, "income-statement", "ltm,annual"),
-        client.standardizedFinancials(companyKey, "cash-flow-statement", "ltm,annual"),
-        client.standardizedFinancials(companyKey, "balance-sheet", "quarterly,annual")
-      ]);
+  const result = await refreshBatch(db, { kind: "financials", companyKeys: [...TRIAL_COMPANIES], order: "given", continueOnError: false }, client);
+  if (result.status === "failed") throw new Error(result.message ?? "Financial refresh failed.");
+}
 
-      upsertCompanyProfile(db, { ...profile, companyKey });
-      upsertMarketSnapshot(db, companyKey, selectLatestRatioRow(ratios));
-      upsertFinancialSnapshot(db, companyKey, deriveFinancialSnapshot(profile, ratios, income, cashFlow, balanceSheet));
+export async function refreshBatch(db: DatabaseSync, options: RefreshBatchOptions, client = new FiscalClient()): Promise<{ runId: number; status: RefreshStatus; message: string }> {
+  const order = options.order ?? "given";
+  const companyKeys = resolveRefreshCompanyKeys(db, options.companyKeys, options.kind, order);
+  const runId = createRefreshRun(db, options.kind, { companyCount: companyKeys.length, order });
+  const runLogger = makeRefreshLogger(db, runId, null, null);
+  const itemIds = companyKeys.map((companyKey, index) => createRefreshRunItem(db, runId, companyKey, index + 1));
+  const failures: Array<{ companyKey: string; message: string }> = [];
+
+  runLogger.log({
+    level: "info",
+    phase: "run",
+    operation: "refreshBatch",
+    message: `Starting ${options.kind} refresh for ${companyKeys.length} companies.`,
+    data: { kind: options.kind, order, companyKeys, continueOnError: options.continueOnError ?? true }
+  });
+
+  for (const [index, companyKey] of companyKeys.entries()) {
+    const itemId = itemIds[index];
+    const logger = makeRefreshLogger(db, runId, itemId, companyKey);
+    updateRefreshRunItem(db, itemId, "running");
+    try {
+      logger.log({ level: "info", phase: "company", operation: "begin", message: `Refreshing ${companyKey}.`, data: { kind: options.kind, ordinal: index + 1, total: companyKeys.length } });
+      if (options.kind === "prices" || options.kind === "all") await refreshCompanyPrices(db, companyKey, client, logger);
+      if (options.kind === "financials" || options.kind === "all") await refreshCompanyFinancials(db, companyKey, client, logger);
+      recomputeModels(db, [companyKey]);
+      updateRefreshRunItem(db, itemId, "success", "Refresh complete.");
+      logger.log({ level: "success", phase: "company", operation: "finish", message: `Completed ${companyKey}.`, data: { kind: options.kind } });
+    } catch (error) {
+      const message = errorMessage(error);
+      failures.push({ companyKey, message });
+      updateRefreshRunItem(db, itemId, "failed", message);
+      logger.log({ level: "error", phase: "company", operation: "finish", message: `Failed ${companyKey}: ${message}`, data: errorDiagnostic(error) });
+      if (options.continueOnError === false) break;
     }
-    recomputeModels(db);
-    finishRefreshRun(db, runId, "success", `Updated financial cache for ${TRIAL_COMPANIES.length} companies.`);
-  } catch (error) {
-    finishRefreshRun(db, runId, "failed", errorMessage(error));
-    throw error;
   }
+
+  const successCount = companyKeys.length - failures.length;
+  const status: RefreshStatus = failures.length === 0 ? "success" : successCount > 0 ? "partial" : "failed";
+  const message = failures.length === 0
+    ? `Updated ${options.kind} data for ${companyKeys.length} companies.`
+    : `Updated ${successCount} of ${companyKeys.length} companies. Failed: ${failures.map((failure) => failure.companyKey).join(", ")}.`;
+  runLogger.log({ level: status === "success" ? "success" : "error", phase: "run", operation: "refreshBatch", message, data: { failures } });
+  finishRefreshRun(db, runId, status, message);
+  return { runId, status, message };
 }
 
+async function refreshCompanyPrices(db: DatabaseSync, companyKey: string, client: FiscalClient, logger: RefreshLogger): Promise<void> {
+  const ratios = await loggedFiscalCall(logger, "market", "companyRatios", { periodType: "latest" }, () => client.companyRatios(companyKey, "latest"), summarizeRatiosPayload);
+  const latest = selectLatestRatioRow(ratios);
+  upsertMarketSnapshot(db, companyKey, latest);
+  logger.log({ level: "success", phase: "market", operation: "upsertMarketSnapshot", message: "Cached latest market ratios.", data: { latestReportDate: latest?.reportDate ?? null, metrics: Object.keys(latest?.metricValues ?? {}) } });
+  await refreshValuationSnapshot(db, companyKey, client, logger);
+  await refreshDailyEvHistory(db, companyKey, client, logger);
+}
 
-async function refreshValuationSnapshot(db: DatabaseSync, companyKey: string, client: FiscalClient): Promise<void> {
-  const ratioEntries = await Promise.all(
-    VALUATION_RATIOS.map(async (config) => [config.key, await client.dailyRatio(companyKey, config.ratioId)] as const)
-  );
+async function refreshCompanyFinancials(db: DatabaseSync, companyKey: string, client: FiscalClient, logger: RefreshLogger): Promise<void> {
+  const profile = await loggedFiscalCall(logger, "financials", "companyProfile", {}, () => client.companyProfile(companyKey), (payload) => ({ name: payload.name, sector: payload.sector, reportingTemplate: payload.reportingTemplate }));
+  const ratios = await loggedFiscalCall(logger, "financials", "companyRatios", { periodType: "latest,annual" }, () => client.companyRatios(companyKey, "latest,annual"), summarizeRatiosPayload);
+  const income = await loggedFiscalCall(logger, "financials", "standardizedFinancials", { statementType: "income-statement", periodType: "ltm,annual" }, () => client.standardizedFinancials(companyKey, "income-statement", "ltm,annual"), summarizeFinancialPayload);
+  const cashFlow = await loggedFiscalCall(logger, "financials", "standardizedFinancials", { statementType: "cash-flow-statement", periodType: "ltm,annual" }, () => client.standardizedFinancials(companyKey, "cash-flow-statement", "ltm,annual"), summarizeFinancialPayload);
+  const balanceSheet = await loggedFiscalCall(logger, "financials", "standardizedFinancials", { statementType: "balance-sheet", periodType: "quarterly,annual" }, () => client.standardizedFinancials(companyKey, "balance-sheet", "quarterly,annual"), summarizeFinancialPayload);
+
+  upsertCompanyProfile(db, { ...profile, companyKey });
+  upsertMarketSnapshot(db, companyKey, selectLatestRatioRow(ratios));
+  upsertFinancialSnapshot(db, companyKey, deriveFinancialSnapshot(profile, ratios, income, cashFlow, balanceSheet));
+  logger.log({ level: "success", phase: "financials", operation: "upsertFinancialSnapshot", message: "Cached company profile, market ratios, and derived financial snapshot.", data: { profileName: profile.name ?? null } });
+}
+
+async function refreshValuationSnapshot(db: DatabaseSync, companyKey: string, client: FiscalClient, logger: RefreshLogger): Promise<void> {
+  const ratioEntries: Array<readonly [string, Array<Record<string, unknown>>]> = [];
+  for (const config of VALUATION_RATIOS) {
+    const series = await loggedFiscalCall(logger, "valuation", "dailyRatio", { ratioId: config.ratioId, metric: config.key }, () => client.dailyRatio(companyKey, config.ratioId), summarizeSeriesPayload);
+    ratioEntries.push([config.key, series] as const);
+  }
   const ratiosByKey = Object.fromEntries(ratioEntries) as any;
-  const prices = await client.stockPrices(companyKey);
+  const prices = await loggedFiscalCall(logger, "valuation", "stockPrices", {}, () => client.stockPrices(companyKey), summarizeSeriesPayload);
   upsertValuationSnapshot(db, companyKey, buildValuationSnapshot(ratiosByKey, prices));
+  logger.log({ level: "success", phase: "valuation", operation: "upsertValuationSnapshot", message: "Cached valuation ratio history and P/E band inputs.", data: { ratioSeries: ratioEntries.map(([key, values]) => ({ key, observations: values.length })), prices: prices.length } });
 }
 
-async function refreshDailyEvHistory(db: DatabaseSync, companyKey: string, client: FiscalClient): Promise<void> {
+async function refreshDailyEvHistory(db: DatabaseSync, companyKey: string, client: FiscalClient, logger: RefreshLogger): Promise<void> {
   try {
-    const [tevSeries, prices] = await Promise.all([
-      client.dailyRatio(companyKey, "calculated_tev"),
-      client.stockPrices(companyKey)
-    ]);
+    const tevSeries = await loggedFiscalCall(logger, "dailyEv", "dailyRatio", { ratioId: "calculated_tev" }, () => client.dailyRatio(companyKey, "calculated_tev"), summarizeSeriesPayload);
+    const prices = await loggedFiscalCall(logger, "dailyEv", "stockPrices", {}, () => client.stockPrices(companyKey), summarizeSeriesPayload);
     const evPoints = (Array.isArray(tevSeries) ? tevSeries : [])
       .map((row: any) => ({
         date: String(row.date ?? "").slice(0, 10),
@@ -91,9 +152,105 @@ async function refreshDailyEvHistory(db: DatabaseSync, companyKey: string, clien
       sharePrice: numberOrNull(point.close_price)
     }));
     upsertDailyEvHistory(db, companyKey, evPoints, pricePoints);
-  } catch {
+    logger.log({ level: "success", phase: "dailyEv", operation: "upsertDailyEvHistory", message: "Cached daily EV and price history.", data: { evPoints: evPoints.length, pricePoints: pricePoints.length } });
+  } catch (error) {
+    logger.log({ level: "warning", phase: "dailyEv", operation: "bestEffort", message: `Daily EV history skipped: ${errorMessage(error)}`, data: errorDiagnostic(error) });
     // Daily EV history is best-effort; failures should not break price refresh.
   }
+}
+
+function resolveRefreshCompanyKeys(db: DatabaseSync, requested: string[] | undefined, kind: RefreshKind, order: RefreshOrder): string[] {
+  const rows = getCompanyRows(db);
+  const rowByKey = new Map(rows.map((row) => [row.companyKey, row]));
+  const requestedKeys = requested && requested.length > 0 ? requested : [...TRIAL_COMPANIES];
+  const unique = [...new Set(requestedKeys)].filter((companyKey) => rowByKey.has(companyKey));
+  if (order === "given") return unique;
+  const freshness = (companyKey: string): string | null => {
+    const row = rowByKey.get(companyKey);
+    if (!row) return null;
+    if (kind === "prices") return row.pricesUpdatedAt;
+    if (kind === "financials") return row.financialsUpdatedAt;
+    const dates = [row.pricesUpdatedAt, row.financialsUpdatedAt].filter((value): value is string => Boolean(value));
+    return dates.sort()[0] ?? null;
+  };
+  return unique.sort((a, b) => compareFreshness(freshness(a), freshness(b), order));
+}
+
+function compareFreshness(a: string | null, b: string | null, order: RefreshOrder): number {
+  if (a === b) return 0;
+  if (a === null) return order === "oldest-first" ? -1 : 1;
+  if (b === null) return order === "oldest-first" ? 1 : -1;
+  return order === "oldest-first" ? a.localeCompare(b) : b.localeCompare(a);
+}
+
+function makeRefreshLogger(db: DatabaseSync, runId: number, itemId: number | null, companyKey: string | null): RefreshLogger {
+  return {
+    runId,
+    itemId,
+    companyKey,
+    log(input) {
+      appendRefreshLog(db, { refreshRunId: runId, itemId, companyKey, ...input });
+    }
+  };
+}
+
+async function loggedFiscalCall<T>(
+  logger: RefreshLogger,
+  phase: string,
+  operation: string,
+  params: Record<string, unknown>,
+  action: () => Promise<T>,
+  summarize: (payload: T) => Record<string, unknown>
+): Promise<T> {
+  logger.log({ level: "info", phase, operation, message: `Calling Fiscal ${operation}.`, data: { companyKey: logger.companyKey, params } });
+  const startedAt = Date.now();
+  try {
+    const payload = await action();
+    const durationMs = Date.now() - startedAt;
+    logger.log({ level: "success", phase, operation, message: `Fiscal ${operation} returned successfully.`, data: { companyKey: logger.companyKey, params, summary: summarize(payload) }, durationMs });
+    return payload;
+  } catch (error) {
+    const durationMs = Date.now() - startedAt;
+    logger.log({ level: "error", phase, operation, message: `Fiscal ${operation} failed: ${errorMessage(error)}`, data: { companyKey: logger.companyKey, params, error: errorDiagnostic(error) }, durationMs });
+    throw error;
+  }
+}
+
+function summarizeRatiosPayload(payload: Record<string, unknown>): Record<string, unknown> {
+  const rows = Array.isArray(payload.data) ? payload.data as Array<Record<string, unknown>> : [];
+  return {
+    rows: rows.length,
+    periodTypes: [...new Set(rows.map((row) => row.periodType).filter(Boolean))],
+    reportDates: rows.map((row) => row.reportDate).filter(Boolean).slice(0, 6),
+    metricKeys: Object.keys((rows[0]?.metricValues as Record<string, unknown> | undefined) ?? {})
+  };
+}
+
+function summarizeFinancialPayload(payload: Record<string, unknown>): Record<string, unknown> {
+  const rows = standardizedRows(payload);
+  return {
+    rows: rows.length,
+    periodTypes: [...new Set(rows.map((row) => row.periodType).filter(Boolean))],
+    reportDates: rows.map((row) => row.reportDate).filter(Boolean).slice(0, 8),
+    firstMetricKeys: Object.keys(rows[0]?.metricsValues ?? {}).slice(0, 16)
+  };
+}
+
+function summarizeSeriesPayload(payload: Array<Record<string, unknown>>): Record<string, unknown> {
+  const dates = payload.map((row) => String(row.date ?? "").slice(0, 10)).filter(Boolean).sort();
+  return {
+    rows: payload.length,
+    earliestDate: dates[0] ?? null,
+    latestDate: dates.at(-1) ?? null,
+    sampleKeys: Object.keys(payload[0] ?? {})
+  };
+}
+
+function errorDiagnostic(error: unknown): Record<string, unknown> {
+  if (error instanceof Error) {
+    return { name: error.name, message: error.message, stack: error.stack?.slice(0, 2000) ?? null };
+  }
+  return { message: String(error) };
 }
 
 function deriveFinancialSnapshot(

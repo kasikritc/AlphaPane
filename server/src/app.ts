@@ -6,6 +6,7 @@ import {
   getCompanyDetail,
   getCompanyRows,
   getImpliedGrowthHistoryData,
+  getRefreshRunDetail,
   getRefreshRuns,
   getValuationDetail,
   getValuationRows,
@@ -13,7 +14,7 @@ import {
   saveColumnPreferences,
   saveCompanyState
 } from "./repository.js";
-import { refreshFinancials, refreshPrices } from "./refresh.js";
+import { refreshBatch, refreshFinancials, refreshPrices } from "./refresh.js";
 
 export function createApp(db: DatabaseSync) {
   const app = express();
@@ -92,6 +93,41 @@ export function createApp(db: DatabaseSync) {
     res.json({ runs: getRefreshRuns(db) });
   });
 
+  app.get("/api/refresh-runs/:id", (req, res) => {
+    const detail = getRefreshRunDetail(db, Number(req.params.id));
+    if (!detail) {
+      res.status(404).json({ error: "Refresh run not found." });
+      return;
+    }
+    res.json(detail);
+  });
+
+  app.post("/api/refresh/batch", async (req, res) => {
+    const companyKeys = cleanCompanyKeys(req.body.companyKeys);
+    if (companyKeys.length === 0) {
+      res.status(400).json({ error: "Select at least one company to refresh." });
+      return;
+    }
+    try {
+      const result = await refreshBatch(db, {
+        companyKeys,
+        kind: cleanRefreshKind(req.body.kind),
+        order: cleanRefreshOrder(req.body.order),
+        continueOnError: req.body.continueOnError !== false
+      });
+      res.json({
+        ok: result.status === "success" || result.status === "partial",
+        result,
+        rows: getCompanyRows(db),
+        valuationRows: getValuationRows(db),
+        runs: getRefreshRuns(db),
+        detail: getRefreshRunDetail(db, result.runId)
+      });
+    } catch (error) {
+      res.status(500).json({ error: errorMessage(error), runs: getRefreshRuns(db) });
+    }
+  });
+
   app.post("/api/refresh/prices", async (_req, res) => {
     try {
       await refreshPrices(db);
@@ -132,6 +168,19 @@ function cleanTerminalMethod(value: unknown): "perpetuity" | "exit-multiple" | u
 
 function cleanExitMetric(value: unknown): "fcf" | "ebitda" | "revenue" | undefined {
   return value === "fcf" || value === "ebitda" || value === "revenue" ? value : undefined;
+}
+
+function cleanCompanyKeys(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map((item) => typeof item === "string" ? item.trim() : "").filter(Boolean))];
+}
+
+function cleanRefreshKind(value: unknown): "prices" | "financials" | "all" {
+  return value === "prices" || value === "financials" || value === "all" ? value : "all";
+}
+
+function cleanRefreshOrder(value: unknown): "given" | "oldest-first" | "newest-first" {
+  return value === "oldest-first" || value === "newest-first" || value === "given" ? value : "oldest-first";
 }
 
 function errorMessage(error: unknown): string {
