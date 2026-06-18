@@ -299,6 +299,22 @@ button:disabled {
   min-height: calc(100vh - 96px);
 }
 
+.layout.panel-rail {
+  grid-template-columns: minmax(720px, 1fr) 56px;
+}
+
+.layout.panel-fullscreen {
+  display: block;
+}
+
+.layout.panel-fullscreen .table-section {
+  display: none;
+}
+
+.layout.panel-fullscreen .detail-panel {
+  height: calc(100vh - 96px);
+}
+
 .table-section {
   min-width: 0;
   border-right: 1px solid var(--line);
@@ -680,6 +696,11 @@ tbody tr.selected td:first-child {
   padding: 18px;
 }
 
+.panel-rail .detail-panel {
+  overflow: hidden;
+  padding: 8px;
+}
+
 .workbench-panel {
   box-shadow: inset 1px 0 0 rgba(255, 255, 255, 0.02);
 }
@@ -690,6 +711,56 @@ tbody tr.selected td:first-child {
   align-items: flex-start;
   justify-content: space-between;
   gap: 14px;
+}
+
+.workbench-header-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.company-panel-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.company-panel-rail {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.company-panel-rail .icon-button {
+  width: 38px;
+  height: 38px;
+}
+
+.rail-ticker {
+  flex: 1;
+  width: 38px;
+  min-height: 132px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0a121b;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.rail-ticker span {
+  color: var(--muted);
+  font-family: "IBM Plex Mono", "Roboto Mono", monospace;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
 }
 
 .workbench-header h2,
@@ -1072,9 +1143,26 @@ textarea {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .layout.panel-rail {
+    grid-template-columns: minmax(0, 1fr) 56px;
+  }
+
+  .layout.panel-fullscreen {
+    display: block;
+  }
+
   .detail-panel {
     height: auto;
     border-top: 1px solid var(--line);
+  }
+
+  .panel-rail .detail-panel {
+    border-top: 0;
+    border-left: 1px solid var(--line);
+  }
+
+  .panel-fullscreen .detail-panel {
+    height: auto;
   }
 
   .table-section {
@@ -1116,6 +1204,15 @@ textarea {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .workbench-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .workbench-header-actions {
+    justify-content: space-between;
+  }
+
   .layout {
     min-height: auto;
   }
@@ -1150,6 +1247,23 @@ textarea {
     left: 0;
     right: auto;
     width: min(320px, calc(100vw - 24px));
+  }
+
+  .layout.panel-rail {
+    grid-template-columns: minmax(0, 1fr) 48px;
+  }
+
+  .panel-rail .detail-panel {
+    padding: 6px;
+  }
+
+  .company-panel-rail .icon-button,
+  .rail-ticker {
+    width: 34px;
+  }
+
+  .company-panel-rail .icon-button {
+    height: 34px;
   }
 
   .rail-row {

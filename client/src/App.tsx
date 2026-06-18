@@ -5,11 +5,15 @@ import {
   ArrowDownUp,
   BadgeCheck,
   ChevronDown,
+  ChevronsLeft,
+  ChevronsRight,
   Columns3,
   DatabaseZap,
   FileText,
   Gauge,
   LineChart,
+  Maximize2,
+  Minimize2,
   RefreshCw,
   Search,
   Settings2,
@@ -102,6 +106,9 @@ const valuationColumns: TableColumn<ValuationRow>[] = [
 
 type WorkbenchSection = "signal" | "assumptions" | "history" | "audit" | "notes";
 type AgreementState = "confirmed" | "valuation-only" | "dcf-only" | "divergent" | "inconclusive";
+type CompanyPanelMode = "open" | "rail" | "fullscreen";
+
+const companyPanelModeStorageKey = "alphapane.companyPanelMode";
 
 interface OpportunityRow extends BaseRow {
   reverse: CompanyRow;
@@ -146,6 +153,7 @@ export function App() {
   const [sortKey, setSortKey] = useState<string>("opportunityScore");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
   const [workbenchSection, setWorkbenchSection] = useState<WorkbenchSection>("signal");
+  const [companyPanelMode, setCompanyPanelMode] = useState<CompanyPanelMode>(() => readStoredCompanyPanelMode());
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState<string | null>(null);
   const [refreshStatus, setRefreshStatus] = useState<string | null>(null);
@@ -169,6 +177,10 @@ export function App() {
     }
     void loadSelectedCompany(selectedKey);
   }, [selectedKey]);
+
+  useEffect(() => {
+    window.localStorage.setItem(companyPanelModeStorageKey, companyPanelMode);
+  }, [companyPanelMode]);
 
   async function loadDashboard() {
     setLoading(true);
@@ -277,7 +289,7 @@ export function App() {
 
       {error && <div className="error">{error}</div>}
 
-      <main className="layout cockpit-layout">
+      <main className={`layout cockpit-layout panel-${companyPanelMode}`}>
         <section className="table-section opportunity-section">
           <div className="queue-header">
             <div>
@@ -330,20 +342,36 @@ export function App() {
           />
         </section>
 
-        <aside className="detail-panel workbench-panel">
-          <CompanyWorkbench
-            opportunity={selectedOpportunity}
-            detail={detail}
-            valuationDetail={valuationDetail}
-            section={workbenchSection}
-            setSection={setWorkbenchSection}
-            runs={runs}
-            onSaved={handleSaved}
-          />
+        <aside className="detail-panel workbench-panel" aria-label="Selected company workbench">
+          {companyPanelMode === "rail" ? (
+            <CompanyPanelRail
+              opportunity={selectedOpportunity}
+              detail={detail}
+              setMode={setCompanyPanelMode}
+            />
+          ) : (
+            <CompanyWorkbench
+              opportunity={selectedOpportunity}
+              detail={detail}
+              valuationDetail={valuationDetail}
+              section={workbenchSection}
+              setSection={setWorkbenchSection}
+              mode={companyPanelMode}
+              setMode={setCompanyPanelMode}
+              runs={runs}
+              onSaved={handleSaved}
+            />
+          )}
         </aside>
       </main>
     </div>
   );
+}
+
+function readStoredCompanyPanelMode(): CompanyPanelMode {
+  if (typeof window === "undefined") return "open";
+  const stored = window.localStorage.getItem(companyPanelModeStorageKey);
+  return stored === "rail" || stored === "fullscreen" || stored === "open" ? stored : "open";
 }
 
 function RefreshControl({ runs, refreshing, refreshStatus, runRefresh }: {
@@ -380,16 +408,46 @@ function RefreshControl({ runs, refreshing, refreshStatus, runRefresh }: {
   );
 }
 
-function CompanyWorkbench({ opportunity, detail, valuationDetail, section, setSection, runs, onSaved }: {
+function CompanyPanelRail({ opportunity, detail, setMode }: {
+  opportunity: OpportunityRow | null;
+  detail: CompanyDetail | null;
+  setMode: (mode: CompanyPanelMode) => void;
+}) {
+  const ticker = detail?.row.ticker ?? opportunity?.ticker ?? "AP";
+  return (
+    <div className="company-panel-rail">
+      <button className="icon-button" onClick={() => setMode("open")} aria-label="Show selected company panel" title="Show selected company panel">
+        <ChevronsLeft size={17} />
+      </button>
+      <button className="icon-button" onClick={() => setMode("fullscreen")} aria-label="Expand selected company panel" title="Expand selected company panel">
+        <Maximize2 size={16} />
+      </button>
+      <div className="rail-ticker" aria-label={`Selected company ${ticker}`}>
+        <span>{ticker}</span>
+      </div>
+    </div>
+  );
+}
+
+function CompanyWorkbench({ opportunity, detail, valuationDetail, section, setSection, mode, setMode, runs, onSaved }: {
   opportunity: OpportunityRow | null;
   detail: CompanyDetail | null;
   valuationDetail: ValuationDetail | null;
   section: WorkbenchSection;
   setSection: (section: WorkbenchSection) => void;
+  mode: CompanyPanelMode;
+  setMode: (mode: CompanyPanelMode) => void;
   runs: RefreshRun[];
   onSaved: () => Promise<void>;
 }) {
-  if (!opportunity || !detail) return <EmptyDetail runs={runs} label="company workbench" />;
+  if (!opportunity || !detail) {
+    return (
+      <>
+        <CompanyPanelControls mode={mode} setMode={setMode} />
+        <EmptyDetail runs={runs} label="company workbench" />
+      </>
+    );
+  }
   const nav: Array<{ key: WorkbenchSection; label: string; icon: ReactNode }> = [
     { key: "signal", label: "Signal", icon: <Gauge size={15} /> },
     { key: "assumptions", label: "Assumptions", icon: <Settings2 size={15} /> },
@@ -405,7 +463,10 @@ function CompanyWorkbench({ opportunity, detail, valuationDetail, section, setSe
           <h2>{detail.row.ticker}</h2>
           <p>{detail.row.name}</p>
         </div>
-        <AgreementPill state={opportunity.agreement} label={opportunity.evidenceLabel} />
+        <div className="workbench-header-actions">
+          <CompanyPanelControls mode={mode} setMode={setMode} />
+          <AgreementPill state={opportunity.agreement} label={opportunity.evidenceLabel} />
+        </div>
       </div>
       <div className="workbench-evidence">
         <EvidenceRail row={opportunity} expanded />
@@ -424,6 +485,27 @@ function CompanyWorkbench({ opportunity, detail, valuationDetail, section, setSe
       {section === "audit" && <AuditWorkbench detail={detail} valuationDetail={valuationDetail} />}
       {section === "notes" && <NotesWorkbench detail={detail} onSaved={onSaved} />}
     </>
+  );
+}
+
+function CompanyPanelControls({ mode, setMode }: {
+  mode: CompanyPanelMode;
+  setMode: (mode: CompanyPanelMode) => void;
+}) {
+  return (
+    <div className="company-panel-controls" aria-label="Selected company panel controls">
+      <button className="icon-button" onClick={() => setMode("rail")} aria-label="Hide selected company panel" title="Hide selected company panel">
+        <ChevronsRight size={17} />
+      </button>
+      <button
+        className={`icon-button ${mode === "fullscreen" ? "active" : ""}`}
+        onClick={() => setMode(mode === "fullscreen" ? "open" : "fullscreen")}
+        aria-label={mode === "fullscreen" ? "Exit full screen company panel" : "Expand selected company panel"}
+        title={mode === "fullscreen" ? "Exit full screen company panel" : "Expand selected company panel"}
+      >
+        {mode === "fullscreen" ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+      </button>
+    </div>
   );
 }
 
