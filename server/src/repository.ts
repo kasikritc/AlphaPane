@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { AssumptionSet, AssumptionSources, BasePeriod, ColumnPreference, CompanyDetail, CompanyRow, EvBridge, ExitMetric, ExitMultipleStat, FinancialBase, ModelCell, ModelDiagnostics, RefreshRun, SensitivityTable, TerminalMethod, ValuationDetail, ValuationHistoryPoint, ValuationMetricKey, ValuationMetricStats, ValuationRow } from "@alphapane/shared";
-import { TRIAL_COMPANIES } from "@alphapane/shared";
+import type { AssumptionSet, AssumptionSources, BasePeriod, ColumnPreference, CompanyDetail, CompanyRow, DailyEvPoint, EvBridge, ExitMetric, ExitMultipleStat, FinancialBase, ImpliedGrowthHistoryData, ModelCell, ModelDiagnostics, RealizedGrowthPoint, RefreshRun, SensitivityTable, TerminalMethod, ValuationDetail, ValuationHistoryPoint, ValuationMetricKey, ValuationMetricStats, ValuationRow } from "@alphapane/shared";
+import { TRIAL_COMPANIES, computeRealizedGrowth } from "@alphapane/shared";
 import { buildModel, buildSensitivity, median } from "./math.js";
 import { VALUATION_RATIOS } from "./valuation.js";
 import type { ValuationSnapshotInput } from "./valuation.js";
@@ -779,6 +779,85 @@ export function upsertValuationSnapshot(db: DatabaseSync, companyKey: string, in
     JSON.stringify(input.peBandLevels),
     now()
   );
+}
+
+export function upsertDailyEvHistory(
+  db: DatabaseSync,
+  companyKey: string,
+  evPoints: Array<{ date: string; enterpriseValue: number | null }>,
+  pricePoints: Array<{ date: string; sharePrice: number | null }>
+): void {
+  const priceByDate = new Map(pricePoints.map((point) => [point.date, point.sharePrice]));
+  const upsert = db.prepare(`
+    INSERT INTO daily_ev_history (company_key, date, enterprise_value, share_price)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(company_key, date) DO UPDATE SET
+      enterprise_value = excluded.enterprise_value,
+      share_price = excluded.share_price
+  `);
+  const seenDates = new Set<string>();
+  for (const point of evPoints) {
+    const date = String(point.date).slice(0, 10);
+    if (!date || seenDates.has(date)) continue;
+    seenDates.add(date);
+    upsert.run(companyKey, date, numberOrNull(point.enterpriseValue), numberOrNull(priceByDate.get(date)));
+  }
+  for (const [date, sharePrice] of priceByDate) {
+    const dateStr = String(date).slice(0, 10);
+    if (!dateStr || seenDates.has(dateStr)) continue;
+    seenDates.add(dateStr);
+    upsert.run(companyKey, dateStr, null, numberOrNull(sharePrice));
+  }
+}
+
+export function getImpliedGrowthHistoryData(db: DatabaseSync, companyKey: string): ImpliedGrowthHistoryData | null {
+  const evRows = db.prepare(`
+    SELECT date, enterprise_value, share_price
+    FROM daily_ev_history
+    WHERE company_key = ? AND date IS NOT NULL
+    ORDER BY date ASC
+  `).all(companyKey) as Array<{ date: string; enterprise_value: number | null; share_price: number | null }>;
+
+  const financialRow = db.prepare(`
+    SELECT revenue_history_json FROM financial_snapshots WHERE company_key = ?
+  `).get(companyKey) as { revenue_history_json?: string } | undefined;
+
+  const revenueHistory = parseJson<Array<{ year: number; value: number; reportDate: string }>>(
+    financialRow?.revenue_history_json,
+    []
+  );
+  const revenueTimeline = revenueHistory
+    .filter((point) => Number.isFinite(point.value) && point.value > 0)
+    .map((point) => ({ reportDate: point.reportDate, revenue: point.value }));
+
+  const dailyEv: DailyEvPoint[] = evRows.map((row) => ({
+    date: row.date,
+    enterpriseValue: numberOrNull(row.enterprise_value),
+    sharePrice: numberOrNull(row.share_price)
+  }));
+
+  const realizedGrowth = computeRealizedGrowth(revenueTimeline) as RealizedGrowthPoint[];
+
+  if (dailyEv.length === 0 && revenueTimeline.length === 0) return null;
+
+  const dates = dailyEv.map((point) => point.date).sort();
+  const earliestDate = dates[0] ?? null;
+  const latestDate = dates[dates.length - 1] ?? null;
+  let maxHistoryYears = 0;
+  if (earliestDate && latestDate) {
+    const earliest = new Date(earliestDate + "T00:00:00.000Z");
+    const latest = new Date(latestDate + "T00:00:00.000Z");
+    maxHistoryYears = (latest.getTime() - earliest.getTime()) / (365.25 * 24 * 60 * 60 * 1000);
+  }
+
+  return {
+    dailyEv,
+    revenueTimeline,
+    realizedGrowth,
+    maxHistoryYears,
+    earliestDate,
+    latestDate
+  };
 }
 
 export function getValuationRows(db: DatabaseSync): ValuationRow[] {

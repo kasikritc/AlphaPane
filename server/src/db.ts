@@ -176,6 +176,14 @@ function migrate(db: DatabaseSync): void {
       finished_at TEXT,
       message TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS daily_ev_history (
+      company_key TEXT NOT NULL REFERENCES companies(company_key) ON DELETE CASCADE,
+      date TEXT NOT NULL,
+      enterprise_value REAL,
+      share_price REAL,
+      PRIMARY KEY (company_key, date)
+    );
   `);
   addColumnIfMissing(db, 'market_snapshots', 'ev_to_ebitda', 'REAL');
   addColumnIfMissing(db, 'market_snapshots', 'fcf_yield', 'REAL');
