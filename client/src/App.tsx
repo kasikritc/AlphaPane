@@ -834,61 +834,90 @@ function ImpliedGrowthChart({
 }) {
   const width = 560;
   const height = 260;
-  const pad = 36;
+  const plot = { top: 18, right: 16, bottom: 52, left: 62 };
+  const plotWidth = width - plot.left - plot.right;
+  const plotHeight = height - plot.top - plot.bottom;
 
   if (points.length < 2) return <p>Not enough data points to draw a chart.</p>;
 
+  const firstDate = points[0].date;
+  const lastDate = points[points.length - 1].date;
+  const firstDateMs = axisDateMs(firstDate);
+  const lastDateMs = axisDateMs(lastDate);
+  const dateSpan = Math.max(lastDateMs - firstDateMs, 1);
+  const visibleRealizedGrowth = realizedGrowth.filter((point) => point.date >= firstDate && point.date <= lastDate);
   const validImplied = points.map((p) => p.impliedCagr).filter((v): v is number => Number.isFinite(v));
-  const validRealized = realizedGrowth.map((p) => p.realizedCagr).filter((v): v is number => Number.isFinite(v));
+  const validRealized = visibleRealizedGrowth.map((p) => p.realizedCagr).filter((v): v is number => Number.isFinite(v));
   const allValues = [...validImplied, ...validRealized];
   if (allValues.length === 0) return <p>No solvable data points in the selected range.</p>;
 
-  const min = Math.min(...allValues);
-  const max = Math.max(...allValues);
+  const rawMin = Math.min(...allValues);
+  const rawMax = Math.max(...allValues);
+  const yTicks = chartTicks(rawMin, rawMax, 5);
+  const min = yTicks[0] ?? rawMin;
+  const max = yTicks[yTicks.length - 1] ?? rawMax;
   const span = max - min || 0.1;
 
-  const x = (index: number, total: number) => pad + (index / Math.max(total - 1, 1)) * (width - pad * 2);
-  const y = (value: number) => height - pad - ((value - min) / span) * (height - pad * 2);
+  const x = (date: string) => plot.left + ((axisDateMs(date) - firstDateMs) / dateSpan) * plotWidth;
+  const y = (value: number) => height - plot.bottom - ((value - min) / span) * plotHeight;
+  const xTickIndexes = chartDateTickIndexes(points.length);
 
   const impliedPoints = points
     .map((point, index) => {
       if (point.impliedCagr === null || !Number.isFinite(point.impliedCagr)) return null;
-      return `${x(index, points.length)},${y(point.impliedCagr)}`;
+      return `${x(point.date)},${y(point.impliedCagr)}`;
     })
     .filter(Boolean)
     .join(" ");
 
-  const sortedRealized = [...realizedGrowth].sort((a, b) => a.date.localeCompare(b.date));
+  const sortedRealized = [...visibleRealizedGrowth].sort((a, b) => a.date.localeCompare(b.date));
   const realizedFullPoints = sortedRealized
     .filter((point) => !point.isPartial && point.realizedCagr !== null && Number.isFinite(point.realizedCagr))
-    .map((point, index, arr) => {
-      const xi = x(index, arr.length);
+    .map((point) => {
+      const xi = x(point.date);
       return `${xi},${y(point.realizedCagr as number)}`;
     })
     .join(" ");
   const realizedPartialPoints = sortedRealized
     .filter((point) => point.isPartial && point.realizedCagr !== null && Number.isFinite(point.realizedCagr))
-    .map((point, index, arr) => {
-      const xi = x(index, arr.length);
+    .map((point) => {
+      const xi = x(point.date);
       return `${xi},${y(point.realizedCagr as number)}`;
     })
     .join(" ");
 
-  const firstDate = points[0].date;
-  const lastDate = points[points.length - 1].date;
-
   return (
     <div className="chart-wrap">
       <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Priced-in growth history chart">
-        <line x1={pad} y1={height - pad} x2={width - pad} y2={height - pad} className="axis" />
-        <line x1={pad} y1={pad} x2={pad} y2={height - pad} className="axis" />
+        <line x1={plot.left} y1={height - plot.bottom} x2={width - plot.right} y2={height - plot.bottom} className="axis" />
+        <line x1={plot.left} y1={plot.top} x2={plot.left} y2={height - plot.bottom} className="axis" />
+        {yTicks.map((tick) => {
+          const tickY = y(tick);
+          return (
+            <g key={tick} className="chart-tick">
+              <line x1={plot.left - 4} y1={tickY} x2={width - plot.right} y2={tickY} className="grid-line" />
+              <text x={plot.left - 8} y={tickY + 4} textAnchor="end">{percent(tick)}</text>
+            </g>
+          );
+        })}
+        {xTickIndexes.map((index) => {
+          const tickX = x(points[index].date);
+          return (
+            <g key={`${points[index].date}-${index}`} className="chart-tick">
+              <line x1={tickX} y1={height - plot.bottom} x2={tickX} y2={height - plot.bottom + 4} className="tick-line" />
+              <text x={tickX} y={height - plot.bottom + 18} textAnchor="middle">{formatAxisDate(points[index].date)}</text>
+            </g>
+          );
+        })}
+        <text className="axis-title" x={(plot.left + width - plot.right) / 2} y={height - 12} textAnchor="middle">Date</text>
+        <text className="axis-title" x={14} y={(plot.top + height - plot.bottom) / 2} textAnchor="middle" transform={`rotate(-90 14 ${(plot.top + height - plot.bottom) / 2})`}>Growth CAGR</text>
         {realizedPartialPoints && <polyline points={realizedPartialPoints} fill="none" stroke="#a78bfa" strokeWidth={1.5} strokeDasharray="2,3" />}
         {realizedFullPoints && <polyline points={realizedFullPoints} fill="none" stroke="#7c3aed" strokeWidth={1.5} strokeDasharray="5,3" />}
         <polyline points={impliedPoints} fill="none" stroke="#2563eb" strokeWidth={2.2} />
       </svg>
       <div className="chart-legend">
         <span><i style={{ background: "#2563eb" }} />Priced-in growth</span>
-        {realizedGrowth.length > 0 && <span><i style={{ background: "#7c3aed" }} />Realized growth</span>}
+        {visibleRealizedGrowth.length > 0 && <span><i style={{ background: "#7c3aed" }} />Realized growth</span>}
       </div>
       <p style={{ fontSize: 11, color: "#5b6258" }}>{firstDate} — {lastDate}</p>
     </div>
@@ -990,6 +1019,46 @@ function zScore(value: number | null): string {
 function dateShort(value: string | null): string {
   if (!value) return "-";
   return new Date(value).toLocaleDateString();
+}
+
+function formatAxisDate(value: string): string {
+  const date = new Date(value + "T00:00:00.000Z");
+  return date.toLocaleDateString(undefined, { month: "short", year: "2-digit", timeZone: "UTC" });
+}
+
+function axisDateMs(value: string): number {
+  return new Date(value + "T00:00:00.000Z").getTime();
+}
+
+function chartDateTickIndexes(total: number): number[] {
+  if (total <= 1) return [0];
+  const targetTicks = Math.min(4, total);
+  return Array.from({ length: targetTicks }, (_, index) => Math.round((index / (targetTicks - 1)) * (total - 1)))
+    .filter((value, index, values) => values.indexOf(value) === index);
+}
+
+function chartTicks(min: number, max: number, count: number): number[] {
+  if (!Number.isFinite(min) || !Number.isFinite(max) || count < 2) return [];
+  if (min === max) return [min];
+  const step = niceChartStep((max - min) / (count - 1));
+  const tickMin = Math.floor(min / step) * step;
+  const tickMax = Math.ceil(max / step) * step;
+  const ticks: number[] = [];
+  for (let value = tickMin; value <= tickMax + step / 2; value += step) {
+    ticks.push(roundChartTick(value));
+  }
+  return ticks;
+}
+
+function niceChartStep(value: number): number {
+  const exponent = Math.floor(Math.log10(value));
+  const fraction = value / Math.pow(10, exponent);
+  const niceFraction = fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 5 ? 5 : 10;
+  return niceFraction * Math.pow(10, exponent);
+}
+
+function roundChartTick(value: number): number {
+  return Math.abs(value) < 1e-10 ? 0 : Number(value.toPrecision(12));
 }
 
 function solveStatusLabel(status: ModelDiagnostics["solveStatus"]): string {

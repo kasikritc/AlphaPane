@@ -723,6 +723,26 @@ textarea {
   stroke-width: 1;
 }
 
+.chart-tick text,
+.axis-title {
+  fill: #5b6258;
+  font-size: 10px;
+}
+
+.axis-title {
+  font-weight: 650;
+}
+
+.chart-tick .grid-line {
+  stroke: #edf0ea;
+  stroke-width: 1;
+}
+
+.chart-tick .tick-line {
+  stroke: #c8cec4;
+  stroke-width: 1;
+}
+
 .chart-legend {
   display: flex;
   flex-wrap: wrap;
